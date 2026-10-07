@@ -520,6 +520,17 @@
   const protoLabel = (c) => ({ sftp: 'SSH', ftp: 'FTP', 'ftps-explicit': 'FTPS (TLS)', 'ftps-implicit': 'FTPS (implicit)' }[protoKey(c)]);
   const isSftpConn = (c) => !!c && c.protocol === 'sftp';
 
+  /** Wraps a password input with an eye button to show/hide what was typed. */
+  function revealable(input) {
+    const toggle = ibtn('eye', 'Show / hide', () => {
+      const show = input.type === 'password';
+      input.type = show ? 'text' : 'password';
+      toggle.classList.toggle('on', show);
+      input.focus();
+    }, 'sm pw-eye', { tabindex: '-1' });
+    return h('div', { class: 'pw-wrap' }, input, toggle);
+  }
+
   function openConnectionForm(existing) {
     const isEdit = !!(existing && existing.id);
     const e = existing || {};
@@ -577,7 +588,7 @@
           e.hasPrivateKey ? h('label', { class: 'check', style: { marginTop: '4px' } }, f.clearKey, h('span', null, 'Remove the saved private key')) : null),
         h('div', { class: 'grid-2' },
           h('div', { class: 'field' }, h('label', null, '…or private key file on this computer'), f.keyPath),
-          h('div', { class: 'field' }, h('label', null, 'Key passphrase'), f.passphrase)),
+          h('div', { class: 'field' }, h('label', null, 'Key passphrase'), revealable(f.passphrase))),
         h('label', { class: 'check' }, f.useAgent, h('span', null, 'Use my SSH agent', h('div', { class: 'hint' }, 'Windows OpenSSH agent, or SSH_AUTH_SOCK on macOS/Linux.')))));
     const sshBox = h('div', { class: 'stack' },
       keyDetails,
@@ -666,7 +677,7 @@
           h('div', { class: 'field' }, h('label', null, 'Port'), f.port)),
         h('div', { class: 'grid-2' },
           h('div', { class: 'field' }, h('label', null, 'Username'), f.user),
-          h('div', { class: 'field' }, pwLabel, f.password)),
+          h('div', { class: 'field' }, pwLabel, revealable(f.password))),
         sshBox,
         ftpsBox,
         h('div', { class: 'grid-2' },

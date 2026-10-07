@@ -330,7 +330,7 @@ async function startFtp() {
   await step('SFTP wrong password gives auth error (401)', async () => {
     let msg = '';
     try { await api('POST', '/api/connections/test', { ...sftpConf, password: 'nope' }); } catch (e) { msg = e.message; }
-    assert(/-> 401: SSH authentication failed/.test(msg), msg);
+    assert(/-> 401: SSH login refused for "deploy".*accepts: .*password.*Tried: password/.test(msg), msg);
   });
   await step('create SFTP connection; host key trusted on first use', async () => {
     const c = await api('POST', '/api/connections', sftpConf);
@@ -349,6 +349,20 @@ async function startFtp() {
     msg = '';
     try { await api('POST', '/api/connections/test', { protocol: 'ssh', host: '127.0.0.1', port: FTP_PORT, user: 'tester', password: 'x' }); } catch (e) { msg = e.message; }
     assert(/-> 400: .*is an FTP server/.test(msg), msg);
+  });
+  await step('SSH login explains failures: wrong password, keyboard-interactive, one-time code', async () => {
+    let msg = '';
+    try { await api('POST', '/api/connections/test', { ...sftpConf, password: 'typo' }); } catch (e) { msg = e.message; }
+    assert(/Most likely the password is wrong/.test(msg), msg);
+    const kbdSrv = await startSftpServer({ port: SFTP_PORT + 2, root: path.join(TMP, 'kbd-root'), user: 'pam', password: 'pam-pass', kbd: 'password' });
+    const ok = await api('POST', '/api/connections/test', { protocol: 'ssh', host: '127.0.0.1', port: SFTP_PORT + 2, user: 'pam', password: 'pam-pass' });
+    assert(ok.ok, 'keyboard-interactive password login');
+    kbdSrv.close();
+    const otpSrv = await startSftpServer({ port: SFTP_PORT + 3, root: path.join(TMP, 'otp-root'), user: 'mfa', password: 'mfa-pass', kbd: 'otp' });
+    msg = '';
+    try { await api('POST', '/api/connections/test', { protocol: 'ssh', host: '127.0.0.1', port: SFTP_PORT + 3, user: 'mfa', password: 'mfa-pass' }); } catch (e) { msg = e.message; }
+    assert(/Verification code/.test(msg) && /second factor/.test(msg), msg);
+    otpSrv.close();
   });
   await step('"ssh" connection type with just host, user and password', async () => {
     const c = await api('POST', '/api/connections', { protocol: 'ssh', host: '127.0.0.1', port: SFTP_PORT, user: 'deploy', password: 'ssh-pass!' });

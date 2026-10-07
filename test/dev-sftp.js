@@ -10,7 +10,7 @@ const { Server, utils } = require('ssh2');
 
 const { STATUS_CODE, flagsToString } = utils.sftp;
 
-function startSftpServer({ port = 2222, host = '127.0.0.1', root, user = 'demo', password = 'demo', publicKey = null, hostKey = null, home = '/', lockRoot = false } = {}) {
+function startSftpServer({ port = 2222, host = '127.0.0.1', root, user = 'demo', password = 'demo', publicKey = null, hostKey = null, home = '/', lockRoot = false, kbd = null } = {}) {
   root = path.resolve(root);
   fs.mkdirSync(path.join(root, ...home.split('/').filter(Boolean)), { recursive: true });
   const hostKeyPem = hostKey || utils.generateKeyPairSync('ed25519').private;
@@ -38,6 +38,15 @@ function startSftpServer({ port = 2222, host = '127.0.0.1', root, user = 'demo',
   const server = new Server({ hostKeys: [hostKeyPem] }, (client) => {
     client.on('error', () => {});
     client.on('authentication', (ctx) => {
+      // kbd: 'password' = keyboard-interactive only (like many PAM setups), 'otp' = password + one-time code.
+      if (kbd) {
+        if (ctx.username === user && ctx.method === 'keyboard-interactive') {
+          const prompts = [{ prompt: 'Password: ', echo: false }];
+          if (kbd === 'otp') prompts.push({ prompt: 'Verification code: ', echo: true });
+          return ctx.prompt(prompts, (answers) => (answers[0] === password && (kbd !== 'otp' || answers[1] === '123456') ? ctx.accept() : ctx.reject()));
+        }
+        return ctx.reject(['keyboard-interactive']);
+      }
       if (ctx.username !== user) return ctx.reject();
       if (ctx.method === 'password' && ctx.password === password) return ctx.accept();
       if (ctx.method === 'publickey' && allowedKey) {

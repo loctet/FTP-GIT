@@ -459,3 +459,9 @@ kbd { font-family: var(--mono); font-size: 10.5px; padding: 1px 5px; border-radi
 .update-banner[hidden] { display: none; }
 .update-banner > .icon { color: var(--warn); font-size: 17px; margin-top: 1px; }
 .update-banner span { color: var(--text-2); }
+
+/* ---------------------------------------------------------------- show/hide password */
+.pw-wrap { position: relative; }
+.pw-wrap .input { padding-right: 40px; }
+.pw-wrap .pw-eye { position: absolute; right: 5px; top: 5px; color: var(--muted); }
+.pw-wrap .pw-eye.on { color: var(--accent); }

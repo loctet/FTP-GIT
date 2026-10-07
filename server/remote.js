@@ -12,7 +12,7 @@ const path = require('path');
 const crypto = require('crypto');
 const { pipeline } = require('stream/promises');
 const ftp = require('basic-ftp');
-const { Client: SSHClient } = require('ssh2');
+const { Client: SSHClient, utils: sshUtils } = require('ssh2');
 const { decrypt } = require('./store');
 
 const S_IFMT = 0o170000;
@@ -171,28 +171,93 @@ function sshConfig(conn, timeout) {
     readyTimeout: timeout,
     keepaliveInterval: 20000,
     keepaliveCountMax: 4,
-    tryKeyboard: true,
   };
   const password = conn.passwordEnc ? decrypt(conn.passwordEnc) : '';
-  if (password) cfg.password = password;
   let key = conn.privateKeyEnc ? decrypt(conn.privateKeyEnc) : '';
+  let keyLabel = 'pasted private key';
   if (!key && conn.keyPath) {
     const p = conn.keyPath.replace(/^~(?=$|[\\/])/, require('os').homedir());
+    keyLabel = `key file ${conn.keyPath}`;
     try {
       key = fs.readFileSync(p, 'utf8');
     } catch (e) {
       throw new Error(`Cannot read private key file ${conn.keyPath}: ${e.code || e.message}`);
     }
   }
+  const passphrase = conn.passphraseEnc ? decrypt(conn.passphraseEnc) : '';
   if (key) {
-    cfg.privateKey = key;
-    const pass = conn.passphraseEnc ? decrypt(conn.passphraseEnc) : '';
-    if (pass) cfg.passphrase = pass;
+    // Parse now so a bad key or wrong passphrase gets a clear message (ssh2 would just skip it).
+    const parsed = sshUtils.parseKey(key, passphrase || undefined);
+    if (parsed instanceof Error) {
+      throw new Error(/passphrase|encrypted/i.test(parsed.message)
+        ? `Private key problem: the ${keyLabel} is encrypted — enter its passphrase.`
+        : `Private key problem (${keyLabel}): ${parsed.message}`);
+    }
   }
-  if (conn.useAgent) {
-    cfg.agent = process.platform === 'win32' ? '\\\\.\\pipe\\openssh-ssh-agent' : process.env.SSH_AUTH_SOCK;
+  const agent = conn.useAgent ? (process.platform === 'win32' ? '\\\\.\\pipe\\openssh-ssh-agent' : process.env.SSH_AUTH_SOCK) : null;
+  return { cfg, password, key, passphrase, keyLabel, agent };
+}
+
+/**
+ * Builds an ssh2 authHandler that tries, in order: SSH agent, private key, password, then
+ * keyboard-interactive (answering password prompts). It records what the server offered and
+ * what was tried, so a failure can say exactly why instead of a generic "authentication failed".
+ */
+function makeAuth({ cfg, password, key, passphrase, keyLabel, agent }) {
+  const username = cfg.username;
+  const plan = [];
+  if (agent) plan.push({ method: 'publickey', label: 'SSH agent', auth: { type: 'agent', username, agent } });
+  if (key) plan.push({ method: 'publickey', label: keyLabel, auth: { type: 'publickey', username, key, passphrase: passphrase || undefined } });
+  const report = { offered: null, tried: [], prompts: [], partial: false };
+  if (password) {
+    plan.push({ method: 'password', label: 'password', auth: { type: 'password', username, password } });
+    plan.push({
+      method: 'keyboard-interactive',
+      label: 'keyboard-interactive',
+      auth: {
+        type: 'keyboard-interactive',
+        username,
+        prompt: (_name, instructions, _lang, prompts, finish) => {
+          for (const p of prompts) report.prompts.push(String(p.prompt || '').trim());
+          if (instructions) report.prompts.push(String(instructions).trim());
+          // Answer password-looking prompts with the password. Others (e.g. a one-time code) cannot be answered.
+          finish(prompts.map((p) => (/pass|mot de passe|kennwort|contrase|senha/i.test(p.prompt || '') || prompts.length === 1 ? password : '')));
+        },
+      },
+    });
   }
-  return { cfg, password };
+  let first = true;
+  const handler = (methodsLeft, partialSuccess, next) => {
+    if (first) {
+      first = false;
+      return next({ type: 'none', username }); // asks the server which methods it accepts
+    }
+    if (Array.isArray(methodsLeft)) report.offered = methodsLeft;
+    if (partialSuccess) report.partial = true;
+    while (plan.length) {
+      const step = plan.shift();
+      if (report.offered && !report.offered.includes(step.method)) continue;
+      report.tried.push(step.label);
+      return next(step.auth);
+    }
+    return next(false);
+  };
+  return { handler, report };
+}
+
+/** Turns an auth report into an actionable message. */
+function authFailureMessage(conn, report, { hasPassword, hasKey }) {
+  const offered = report.offered || [];
+  const parts = [`SSH login refused for "${conn.user}" on ${conn.host}.`];
+  if (offered.length) parts.push(`The server accepts: ${offered.join(', ')}.`);
+  if (report.tried.length) parts.push(`Tried: ${report.tried.join(', ')} — rejected.`);
+  const otp = report.prompts.find((p) => p && !/pass|mot de passe|kennwort|contrase|senha/i.test(p));
+  if (report.partial) parts.push('The server accepted a first factor but requires another one (multi-factor login).');
+  if (otp) parts.push(`The server also asked "${otp}", which looks like a second factor (one-time code). Use an SSH key, or ask the admin whether key login is allowed.`);
+  else if (hasPassword && !offered.includes('password') && !offered.includes('keyboard-interactive')) parts.push('This server does not accept passwords: use an SSH key.');
+  else if (hasPassword && !hasKey) parts.push('Most likely the password is wrong: retype it (watch the keyboard layout and spaces) and test again.');
+  else if (hasKey && offered.includes('publickey')) parts.push('The key is not authorized for this user (not in ~/.ssh/authorized_keys on the server).');
+  return parts.join(' ');
 }
 
 function fingerprint(keyBuf) {
@@ -225,10 +290,18 @@ class SftpRemote {
   /** Opens the SSH connection (verifying the host key) and, unless sftp=false, the SFTP channel. */
   connect({ sftp = true } = {}) {
     const conn = this.conn;
-    const { cfg, password } = sshConfig(conn, this.timeout);
-    if (!cfg.password && !cfg.privateKey && !cfg.agent) {
+    let creds;
+    try {
+      creds = sshConfig(conn, this.timeout);
+    } catch (e) {
+      return Promise.reject(e);
+    }
+    const { cfg } = creds;
+    if (!creds.password && !creds.key && !creds.agent) {
       return Promise.reject(new Error('No credentials: enter a password or a private key.'));
     }
+    const auth = makeAuth(creds);
+    cfg.authHandler = auth.handler;
     let mismatch = null;
     cfg.hostVerifier = (key) => {
       const fp = fingerprint(key);
@@ -251,9 +324,6 @@ class SftpRemote {
           reject(e);
         }
       };
-      ssh.on('keyboard-interactive', (_name, _instr, _lang, prompts, finish) => {
-        finish(prompts.map(() => password || ''));
-      });
       ssh.on('ready', () => {
         this.isClosed = false;
         if (!sftp) {
@@ -280,8 +350,9 @@ class SftpRemote {
           return fail(err);
         }
         if (e.level === 'client-authentication') {
-          const err = new Error('SSH authentication failed. Check the username, password or private key.');
+          const err = new Error(authFailureMessage(conn, auth.report, { hasPassword: !!creds.password, hasKey: !!(creds.key || creds.agent) }));
           err.code = 'AUTH';
+          err.auth = auth.report;
           return fail(err);
         }
         if (/passphrase/i.test(e.message || '') || /Cannot parse privateKey/i.test(e.message || '')) {
