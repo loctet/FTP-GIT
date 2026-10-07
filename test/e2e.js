@@ -605,6 +605,20 @@ async function startFtp() {
     try { await api('POST', `/api/repos/${srepo.id}/sync-scope`, { subPath: 'assets', dryRun: true }); } catch (e) { msg = e.message; }
     assert(/400: Choose one mapping/.test(msg), msg);
   });
+  await step('sync several sub-folders of a mapping at once (nested picks are merged)', async () => {
+    const p = await api('POST', `/api/repos/${srepo.id}/sync-scope`, { mappingId: srepo.mappings[0].id, subPaths: ['assets', 'css', 'assets/deep', 'css'], dryRun: true });
+    const got = p.uploads.map((o) => o.remote).sort().join(',');
+    assert(p.uploadCount === 2 && got === '~/front/assets/logo.svg,~/front/css/site.css', got);
+    assert(/\{assets, css\}/.test(p.scope), p.scope);
+    fs.mkdirSync(H('front', 'css'), { recursive: true });
+    fs.writeFileSync(H('front', 'assets', 'zz.png'), 'x');
+    fs.writeFileSync(H('front', 'css', 'zz.css'), 'x');
+    fs.writeFileSync(H('front', 'outside.html'), 'x');
+    const r = await api('POST', `/api/repos/${srepo.id}/sync-scope`, { mappingId: srepo.mappings[0].id, subPaths: ['assets', 'css'], mirror: true, wait: true });
+    assert(r.deployment.status === 'success' && r.deployment.uploaded === 2 && r.deployment.deleted === 2, JSON.stringify(r.deployment).slice(0, 300));
+    assert(!fs.existsSync(H('front', 'assets', 'zz.png')) && !fs.existsSync(H('front', 'css', 'zz.css')) && fs.existsSync(H('front', 'outside.html')), 'mirror limited to the chosen folders');
+    fs.unlinkSync(H('front', 'outside.html'));
+  });
   await step('mirror a sub-folder deletes only extra files inside it', async () => {
     fs.writeFileSync(H('front', 'assets', 'old.png'), 'x');
     fs.writeFileSync(H('front', 'stale.html'), 'x');
@@ -669,6 +683,15 @@ async function startFtp() {
     assert(r.deployment.status === 'success' && r.deployment.uploaded === 2 && r.deployment.deleted === 1 && !r.deployment.to, JSON.stringify(r.deployment).slice(0, 400));
     assert(fs.readFileSync(H('react', 'index.html'), 'utf8') === '<div id=root></div>' && !fs.existsSync(H('react', 'assets', 'app-old.js')), 'server folder replaced');
     assert(!fs.existsSync(H('react-api')), 'git mapping untouched');
+  });
+  await step('several sub-folders of a local folder', async () => {
+    writeBuild('fonts/a.woff2', 'font');
+    writeBuild('img/logo.png', 'png');
+    const p = await api('POST', `/api/repos/${lrepo.id}/sync-scope`, { mappingId: lrepo.mappings[0].id, subPaths: ['assets', 'fonts'], dryRun: true });
+    const got = p.uploads.map((o) => o.remote).sort().join(',');
+    assert(got === '~/react/assets/app-abc.js,~/react/fonts/a.woff2', got);
+    fs.rmSync(path.join(BUILD, 'fonts'), { recursive: true });
+    fs.rmSync(path.join(BUILD, 'img'), { recursive: true });
   });
   await step('sub-folder picker browses the local folder', async () => {
     const t = await api('GET', `/api/repos/${lrepo.id}/tree?mappingId=${lrepo.mappings[0].id}`);

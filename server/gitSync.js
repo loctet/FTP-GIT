@@ -267,6 +267,12 @@ function normSub(p) {
   return normLocal(p).split('/').filter((s) => s && s !== '.' && s !== '..').join('/');
 }
 
+/** Cleans a list of sub-folders: no duplicates, and none inside another selected one. */
+function normSubPaths(list) {
+  const subs = [...new Set((list || []).map(normSub).filter(Boolean))].sort();
+  return subs.filter((p) => !subs.some((o) => o !== p && p.startsWith(o + '/')));
+}
+
 // ---------------------------------------------------------------- local-folder mappings
 // A mapping can take its files from git (the pushed commit) or from a folder on this computer,
 // e.g. a build output like frontend/dist that is not committed.
@@ -333,7 +339,7 @@ function fileHash(abs, size) {
  * (size, mtime, content hash) and also deletes files that disappeared, if the mapping allows it.
  * Returns { ops, manifests: { mappingId: newManifest } } — manifests are saved only after success.
  */
-function planLocal(repo, mappings, { mode = 'all', subPath = '' } = {}) {
+function planLocal(repo, mappings, { mode = 'all', subPaths = [] } = {}) {
   const excluded = compileExcludes(repo.excludes);
   const old = loadManifests(repo);
   const ops = [];
@@ -343,8 +349,11 @@ function planLocal(repo, mappings, { mode = 'all', subPath = '' } = {}) {
     const remote = normRemote(m.remote);
     const prev = old[m.id] || {};
     const next = {};
-    const inSub = (rel) => !subPath || rel === subPath || rel.startsWith(subPath + '/');
-    for (const f of scanLocalDir(subPath ? path.join(root, ...subPath.split('/')) : root).map((x) => ({ ...x, rel: subPath ? `${subPath}/${x.rel}` : x.rel }))) {
+    const inSub = (rel) => !subPaths.length || subPaths.some((sp) => rel === sp || rel.startsWith(sp + '/'));
+    const scanned = subPaths.length
+      ? subPaths.flatMap((sp) => scanLocalDir(path.join(root, ...sp.split('/'))).map((x) => ({ ...x, rel: `${sp}/${x.rel}` })))
+      : scanLocalDir(root);
+    for (const f of scanned) {
       if (excluded.some((fn) => fn(excludePathFor(m, f.rel)))) continue;
       const before = prev[f.rel];
       let hash = before && before.size === f.size && before.mtimeMs === f.mtimeMs ? before.hash : undefined;
@@ -360,27 +369,30 @@ function planLocal(repo, mappings, { mode = 'all', subPath = '' } = {}) {
         if (!next[rel] && inSub(rel)) ops.push({ type: 'delete', local: true, path: rel, remote: path.posix.join(remote, rel), mappingId: m.id });
       }
     }
-    // Keep entries outside the synced sub-folder; replace the ones inside it.
-    const merged = subPath ? Object.fromEntries(Object.entries(prev).filter(([rel]) => !inSub(rel))) : {};
+    // Keep entries outside the synced sub-folders; replace the ones inside them.
+    const merged = subPaths.length ? Object.fromEntries(Object.entries(prev).filter(([rel]) => !inSub(rel))) : {};
     manifests[m.id] = { ...merged, ...next };
   }
   return { ops, manifests };
 }
 
-/** Normalizes a scope request: { mappingIds: [] (empty = all), subPath, mirror, runCommand }. */
+/** Normalizes a scope request: { mappingIds: [] (empty = all), subPaths: [] (or subPath), mirror, runCommand }. */
 function normScope(repo, scope = {}) {
   const ids = (Array.isArray(scope.mappingIds) ? scope.mappingIds : scope.mappingId ? [scope.mappingId] : [])
     .filter((x) => (repo.mappings || []).some((m) => m.id === x));
   const mappings = ids.length ? repo.mappings.filter((m) => ids.includes(m.id)) : repo.mappings || [];
-  const subPath = normSub(scope.subPath);
-  if (subPath && mappings.length !== 1) throw Object.assign(new Error('Choose one mapping to sync a sub-folder.'), { status: 400 });
-  const everything = mappings.length === (repo.mappings || []).length && !subPath;
+  const subPaths = normSubPaths(Array.isArray(scope.subPaths) ? scope.subPaths : scope.subPath ? [scope.subPath] : []);
+  if (subPaths.length && mappings.length !== 1) throw Object.assign(new Error('Choose one mapping to sync sub-folders.'), { status: 400 });
+  const everything = mappings.length === (repo.mappings || []).length && !subPaths.length;
   const src = (m) => (isLocalMapping(m) ? `${String(m.local).replace(/\\/g, '/').replace(/\/+$/, '')}` : normLocal(m.local) || '(repo root)');
   const label = everything && !ids.length
     ? 'all mappings'
-    : mappings.map((m) => `${src(m)}${subPath ? '/' + subPath : ''} → ${path.posix.join(normRemote(m.remote), subPath)}`).join(', ');
+    : mappings.map((m) => {
+      const sub = subPaths.length === 1 ? `/${subPaths[0]}` : subPaths.length ? `/{${subPaths.join(', ')}}` : '';
+      return `${src(m)}${sub} → ${normRemote(m.remote).replace(/\/+$/, '')}${sub}`;
+    }).join(', ');
   return {
-    ids, mappings, subPath, everything, mirror: !!scope.mirror, runCommand: !!scope.runCommand, label,
+    ids, mappings, subPaths, everything, mirror: !!scope.mirror, runCommand: !!scope.runCommand, label,
     needsGit: mappings.some((m) => !isLocalMapping(m)),
   };
 }
@@ -388,11 +400,10 @@ function normScope(repo, scope = {}) {
 /** Upload operations of the git mappings in a scope (remote paths may still use "~"). */
 function planScoped(repo, files, s) {
   const ops = plan({ ...repo, mappings: s.mappings }, files);
-  if (!s.subPath) return ops;
-  const m = s.mappings[0];
-  const local = normLocal(m.local);
-  const prefix = `${local ? local + '/' : ''}${s.subPath}/`;
-  return ops.filter((op) => op.path.startsWith(prefix));
+  if (!s.subPaths.length) return ops;
+  const local = normLocal(s.mappings[0].local);
+  const prefixes = s.subPaths.map((sp) => `${local ? local + '/' : ''}${sp}/`);
+  return ops.filter((op) => prefixes.some((p) => op.path.startsWith(p)));
 }
 
 /** Every file below a remote folder (absolute paths). Symlinks are left alone. */
@@ -429,12 +440,16 @@ async function mirrorDeletes(repo, client, s, uploadOps) {
   const deletes = [];
   for (const m of s.mappings) {
     const mRoot = resolveRemotePath(client.home, normRemote(m.remote));
-    const start = s.subPath ? path.posix.join(mRoot, s.subPath) : mRoot;
-    if (start === '/' || start === resolveRemotePath(client.home, '~')) {
-      throw Object.assign(new Error(`Refusing to mirror ${start}: it is the server root or your home folder. Map the repository to a dedicated sub-folder first.`), { status: 400 });
+    const starts = s.subPaths.length ? s.subPaths.map((sp) => path.posix.join(mRoot, sp)) : [mRoot];
+    for (const start of starts) {
+      if (start === '/' || start === resolveRemotePath(client.home, '~')) {
+        throw Object.assign(new Error(`Refusing to mirror ${start}: it is the server root or your home folder. Map the repository to a dedicated sub-folder first.`), { status: 400 });
+      }
     }
     const nested = roots.filter((r) => r.id !== m.id && r.root !== mRoot && r.root.startsWith(mRoot + '/')).map((r) => r.root);
-    for (const f of await listRemoteFiles(client, start, nested)) {
+    const remoteFiles = [];
+    for (const start of starts) remoteFiles.push(...(await listRemoteFiles(client, start, nested)));
+    for (const f of remoteFiles) {
       if (planned.has(f) || nested.some((r) => f.startsWith(r + '/'))) continue;
       const rel = f.slice(mRoot.length + 1);
       const repoPath = excludePathFor(m, rel);
@@ -449,7 +464,7 @@ async function mirrorDeletes(repo, client, s, uploadOps) {
 async function planScopeAll(repo, s, dir, sha) {
   let ops = [];
   if (s.needsGit) ops = planScoped(repo, await listTree(dir, sha), s);
-  const local = planLocal(repo, s.mappings, { mode: 'all', subPath: s.subPath });
+  const local = planLocal(repo, s.mappings, { mode: 'all', subPaths: s.subPaths });
   return { ops: [...ops, ...local.ops], manifests: local.manifests };
 }
 

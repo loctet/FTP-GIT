@@ -1594,13 +1594,27 @@
       h('option', { value: '' }, `All mappings (${r.mappings.length}) — every file`),
       r.mappings.map((m) => h('option', { value: m.id }, mappingLabel(m))));
     select.value = mappingId || '';
-    const sub = h('input', { class: 'input mono', placeholder: 'empty = the whole folder · e.g. assets/img', spellcheck: 'false' });
+    // Selected sub-folders (relative to the mapping folder). Empty = the whole mapping.
+    let subs = [];
+    const cleanSub = (p) => String(p || '').replace(/\\/g, '/').split('/').filter((x) => x && x !== '.' && x !== '..').join('/');
+    const addSubs = (list) => {
+      const all = [...new Set([...subs, ...list.map(cleanSub).filter(Boolean)])].sort();
+      // A folder inside another selected one is already covered.
+      subs = all.filter((p) => !all.some((o) => o !== p && p.startsWith(o + '/')));
+      invalidate();
+    };
+    const chips = h('div', { class: 'sub-chips' });
+    const subInput = h('input', { class: 'input mono', placeholder: 'type a sub-folder, e.g. assets/img, then Enter', spellcheck: 'false' });
+    subInput.addEventListener('keydown', (ev) => {
+      if (ev.key === 'Enter') { ev.preventDefault(); addSubs(subInput.value.split(/[,;\n]/)); subInput.value = ''; }
+    });
+    const addBtn = btn('Add', 'plus', () => { addSubs(subInput.value.split(/[,;\n]/)); subInput.value = ''; }, 'sm');
     const subHint = h('div', { class: 'hint' });
-    const browse = btn('Browse', 'folder', async () => {
+    const browse = btn('Browse…', 'folder', async () => {
       const m = r.mappings.find((x) => x.id === select.value);
       if (!m) return;
-      const picked = await pickRepoFolder(r, m, sub.value);
-      if (picked !== null) { sub.value = picked; invalidate(); }
+      const picked = await pickRepoFolders(r, m, subs);
+      if (picked !== null) { subs = []; addSubs(picked); }
     }, 'sm');
     const mirror = h('input', { type: 'checkbox' });
     const runCmd = h('input', { type: 'checkbox' });
@@ -1608,7 +1622,7 @@
     let preview = null;
     let previewKey = null;
 
-    const params = () => ({ mappingId: select.value || undefined, subPath: select.value ? sub.value.trim() : '', mirror: mirror.checked, runCommand: runCmd.checked });
+    const params = () => ({ mappingId: select.value || undefined, subPaths: select.value ? subs : [], mirror: mirror.checked, runCommand: runCmd.checked });
     const key = () => JSON.stringify(params());
     const syncInfo = h('div');
     let lastSel = null;
@@ -1618,6 +1632,7 @@
       setKids(out);
       const m = r.mappings.find((x) => x.id === select.value);
       if (select.value !== lastSel) {
+        if (lastSel !== null) subs = []; // sub-folders belong to one mapping
         lastSel = select.value;
         // A build folder usually replaces what is on the server: propose mirror (with confirmation).
         mirror.checked = !!(m && isLocalMap(m));
@@ -1627,16 +1642,20 @@
       setKids(syncInfo, h('div', { class: 'callout' }, icon('info'), h('div', null,
         anyGit ? h('div', null, 'Git folders: every file as it is in the latest pushed commit on ', h('b', null, r.branch), ' (unpushed local edits are not included).') : null,
         anyLocal ? h('div', null, 'Local folders: every file currently in the folder on this computer — build it first (e.g. ', h('code', null, 'npm run build'), ').') : null)));
-      sub.disabled = !m;
-      browse.disabled = !m;
-      if (!m) sub.value = '';
-      const subP = sub.value.trim().replace(/^\/+|\/+$/g, '');
-      subHint.textContent = m
-        ? `Uploads ${m.local ? m.local + '/' : ''}${subP ? subP + '/' : ''}… → ${m.remote.replace(/\/$/, '')}${subP ? '/' + subP : ''}/`
-        : 'Uploads every file of every mapping (same as "Redeploy all").';
+      for (const el of [subInput, addBtn, browse]) el.disabled = !m;
+      setKids(chips, subs.length
+        ? subs.map((sp) => h('span', { class: 'sub-chip' }, icon('folder'), sp, h('button', { type: 'button', title: 'Remove', onclick: () => { subs = subs.filter((x) => x !== sp); invalidate(); } }, icon('x'))))
+        : h('span', { class: 'hint' }, m ? 'Whole mapping (no sub-folder selected)' : 'Choose one mapping to pick sub-folders'));
+      if (subs.length) chips.append(h('button', { type: 'button', class: 'btn sm ghost', onclick: () => { subs = []; invalidate(); } }, 'Clear'));
+      const src = m ? (isLocalMap(m) ? m.local.replace(/[\\/]+$/, '') : (m.local || '').replace(/\/+$/, '')) : '';
+      const dst = m ? m.remote.replace(/\/+$/, '') : '';
+      subHint.textContent = !m
+        ? 'Uploads every file of every mapping (same as "Redeploy all").'
+        : subs.length
+          ? `Uploads ${subs.length} folder${subs.length > 1 ? 's' : ''}: ${subs.map((sp) => `${sp}/ → ${dst}/${sp}/`).join('  ·  ')}`
+          : `Uploads ${src || '(repo root)'}/… → ${dst}/`;
     };
     select.addEventListener('change', invalidate);
-    sub.addEventListener('input', invalidate);
     mirror.addEventListener('change', invalidate);
     runCmd.addEventListener('change', invalidate);
 
@@ -1651,12 +1670,12 @@
           mirror.checked ? h('span', null, ` · ${p.deleteCount} file${p.deleteCount === 1 ? '' : 's'} to delete on the server`) : null,
           p.usesGit ? h('div', { class: 'hint' }, `Git files from commit ${short(p.sha)} on ${p.branch}: ${p.subject}`) : null,
           (p.localDirs || []).map((d) => h('div', { class: 'hint' }, 'Local files from ', h('code', null, d))))),
-        list.length ? h('div', { class: 'console', style: { maxHeight: '240px' } }, list, p.truncated ? h('div', { class: 'l t' }, '… list truncated') : null) : h('div', { class: 'hint' }, 'Nothing to upload: no files match (check the mapping source, sub-folder and exclude patterns; a local build folder may be empty).')));
+        list.length ? h('div', { class: 'console', style: { maxHeight: '240px' } }, list, p.truncated ? h('div', { class: 'l t' }, '… list truncated') : null) : h('div', { class: 'hint' }, 'Nothing to upload: no files match (check the mapping source, sub-folders and exclude patterns; a local build folder may be empty).')));
     };
 
     const runPreview = async () => {
       previewBtn.disabled = true;
-      setKids(out, h('div', { class: 'callout' }, icon('loader', 'spin'), mirror.checked ? 'Fetching the branch and listing the server folder…' : 'Fetching the branch…'));
+      setKids(out, h('div', { class: 'callout' }, icon('loader', 'spin'), mirror.checked ? 'Reading the source and listing the server folder…' : 'Reading the source…'));
       try {
         const k = key();
         const p = await api('POST', `/api/repos/${r.id}/sync-scope`, { ...params(), dryRun: true });
@@ -1671,13 +1690,14 @@
     };
 
     const runSync = async () => {
+      if (subInput.value.trim()) { addSubs(subInput.value.split(/[,;\n]/)); subInput.value = ''; }
       if (mirror.checked) {
         const p = preview && previewKey === key() ? preview : await runPreview();
         if (!p) return;
         if (p.deleteCount && !(await confirmDialog({
           title: `Delete ${p.deleteCount} file${p.deleteCount === 1 ? '' : 's'} on the server?`,
           message: h('div', null,
-            h('p', { style: { marginTop: 0 } }, 'Mirror mode deletes server files in this folder that are not in the source. Files matching your exclude patterns are kept.'),
+            h('p', { style: { marginTop: 0 } }, 'Mirror mode deletes server files in the synced folders that are not in the source. Files matching your exclude patterns are kept.'),
             h('div', { class: 'console', style: { maxHeight: '180px' } }, p.deletes.slice(0, 200).map((o) => h('div', { class: 'l' }, h('span', { class: 'error' }, '✕ '), o.remote)))),
           confirmText: 'Sync and delete', danger: true,
         }))) return;
@@ -1686,23 +1706,30 @@
       try {
         const res = await api('POST', `/api/repos/${r.id}/sync-scope`, params());
         m.close();
-        toast('info', 'Sync started', select.value ? mappingLabel(r.mappings.find((x) => x.id === select.value)) : 'All mappings');
+        const mm = r.mappings.find((x) => x.id === select.value);
+        toast('info', 'Sync started', mm ? `${mappingLabel(mm)}${subs.length ? ` (${subs.length} sub-folder${subs.length > 1 ? 's' : ''})` : ''}` : 'All mappings');
         openDeployLog(res.deploymentId);
       } catch (e) {
         toast('error', 'Sync failed to start', e.message);
       } finally { syncBtn.disabled = false; }
     };
 
-    const previewBtn = btn('Preview', 'eye', runPreview);
+    const previewBtn = btn('Preview', 'eye', async () => {
+      if (subInput.value.trim()) { addSubs(subInput.value.split(/[,;\n]/)); subInput.value = ''; }
+      runPreview();
+    });
     const syncBtn = btn('Sync now', 'upload', runSync, 'primary');
     const m = modal({
       title: `Sync files — ${r.name}`, iconName: 'upload', size: 'wide',
       body: h('div', { class: 'stack' },
         syncInfo,
         h('div', { class: 'field' }, h('label', null, 'What to sync'), select),
-        h('div', { class: 'field' }, h('label', null, 'Only this sub-folder (optional)'), h('div', { class: 'row' }, sub, browse), subHint),
+        h('div', { class: 'field' }, h('label', null, 'Only these sub-folders (optional — pick one or several)'),
+          chips,
+          h('div', { class: 'row' }, subInput, addBtn, browse),
+          subHint),
         h('label', { class: 'check' }, mirror, h('span', null, 'Replace the server folder (mirror): also delete server files that are not in the source',
-          h('div', { class: 'hint' }, 'Only inside the synced folder. Files matching the exclude patterns (e.g. vendor/, uploads/, .env) are never deleted. You will see the list before anything is deleted.'))),
+          h('div', { class: 'hint' }, 'Only inside the synced folders. Files matching the exclude patterns (e.g. vendor/, uploads/, .env) are never deleted. You will see the list before anything is deleted.'))),
         r.postDeployCommand ? h('label', { class: 'check' }, runCmd, h('span', null, 'Run the post-deploy command afterwards', h('div', { class: 'hint mono' }, r.postDeployCommand))) : null,
         out),
       foot: [h('div', { class: 'left' }, previewBtn), btn('Cancel', null, () => m.close()), syncBtn],
@@ -1710,19 +1737,32 @@
     invalidate();
   }
 
-  /** Browse the repository folders (at the branch head) inside a mapping. Resolves to a path relative to the mapping, or null. */
-  function pickRepoFolder(r, mapping, start) {
+  /**
+   * Browse the folders of a mapping (repository at the branch head, or the local folder) and tick
+   * one or several. Click a name to open it, tick the box to select it. Resolves to the selected
+   * paths (relative to the mapping), or null if cancelled.
+   */
+  function pickRepoFolders(r, mapping, initial = []) {
     return new Promise((resolve) => {
       const local = (mapping.local || '').replace(/^\/+|\/+$/g, '');
-      let cur = String(start || '').replace(/^\/+|\/+$/g, '');
-      let picked = null;
+      const isLoc = isLocalMap(mapping);
+      const selected = new Set(initial);
+      let cur = '';
+      let result = null;
       let refreshed = false;
       const pathEl = h('div', { class: 'mono hint' });
       const listEl = h('div', { class: 'picker-list' });
+      const countEl = h('span', { class: 'hint' });
+      const selEl = h('div', { class: 'sub-chips' });
+      const renderSel = () => {
+        countEl.textContent = selected.size ? `${selected.size} selected` : 'Nothing selected = whole mapping';
+        setKids(selEl, [...selected].sort().map((sp) => h('span', { class: 'sub-chip' }, icon('folder'), sp, h('button', { type: 'button', title: 'Remove', onclick: () => { selected.delete(sp); renderSel(); load(cur); } }, icon('x')))));
+        doneBtn.textContent = '';
+        append(doneBtn, [icon('check'), selected.size ? `Use ${selected.size} folder${selected.size > 1 ? 's' : ''}` : 'Use whole mapping']);
+      };
       const load = async (rel) => {
-        setKids(listEl, h('div', { class: 'picker-item hint' }, icon('loader', 'spin'), refreshed ? 'Loading…' : 'Fetching the branch…'));
+        setKids(listEl, h('div', { class: 'picker-item hint' }, icon('loader', 'spin'), refreshed || isLoc ? 'Loading…' : 'Fetching the branch…'));
         try {
-          const isLoc = isLocalMap(mapping);
           const full = isLoc ? rel : [local, rel].filter(Boolean).join('/');
           const t = await api('GET', `/api/repos/${r.id}/tree?${q({ path: full, refresh: refreshed || isLoc ? '0' : '1', mappingId: mapping.id })}`);
           refreshed = true;
@@ -1731,19 +1771,38 @@
           const strip = (p) => (isLoc || !local ? p : p.slice(local.length + 1));
           setKids(listEl,
             cur ? h('div', { class: 'picker-item', onclick: () => load(cur.split('/').slice(0, -1).join('/')) }, icon('arrow-up'), '..') : null,
-            ...t.dirs.map((d) => h('div', { class: 'picker-item', onclick: () => load(strip(d.path)) }, h('span', { class: 'ficon dir' }, icon('folder')), d.name)),
+            ...t.dirs.map((d) => {
+              const rp = strip(d.path);
+              const covered = [...selected].some((s) => rp.startsWith(s + '/'));
+              const cb = h('input', { type: 'checkbox', checked: selected.has(rp) || covered, disabled: covered, title: covered ? 'Already included by a selected parent folder' : 'Select this folder' });
+              cb.addEventListener('click', (ev) => ev.stopPropagation());
+              cb.addEventListener('change', () => {
+                if (cb.checked) {
+                  selected.add(rp);
+                  for (const s of [...selected]) if (s.startsWith(rp + '/')) selected.delete(s); // parent covers children
+                } else selected.delete(rp);
+                renderSel();
+              });
+              return h('div', { class: 'picker-item picker-check' }, cb,
+                h('span', { class: 'grow row', style: { cursor: 'pointer' }, title: 'Open', onclick: () => load(rp) }, h('span', { class: 'ficon dir' }, icon('folder')), d.name),
+                h('span', { class: 'hint' }, icon('chevron-right')));
+            }),
             !t.dirs.length ? h('div', { class: 'picker-item hint' }, 'No sub-folders') : null);
         } catch (e) {
           setKids(listEl, h('div', { class: 'picker-item', style: { color: 'var(--danger)' } }, icon('alert'), e.message));
         }
       };
+      const doneBtn = btn('', null, () => { result = [...selected]; m.close(); }, 'primary');
       const m = modal({
-        title: 'Choose a sub-folder', iconName: 'folder',
-        body: h('div', { class: 'stack' }, h('div', { class: 'hint' }, isLocalMap(mapping) ? 'Folders on this computer' : `Folders in ${mapping.local || 'the repository'} on branch ${r.branch} (latest pushed commit)`), pathEl, listEl),
-        foot: [btn('Whole mapping', null, () => { picked = ''; m.close(); }), btn('Cancel', null, () => m.close()), btn('Select this folder', 'check', () => { picked = cur; m.close(); }, 'primary')],
-        onClose: () => resolve(picked),
+        title: 'Choose sub-folders', iconName: 'folder',
+        body: h('div', { class: 'stack' },
+          h('div', { class: 'hint' }, (isLoc ? 'Folders on this computer' : `Folders in ${mapping.local || 'the repository'} on branch ${r.branch} (latest pushed commit)`) + ' — tick to select, click a name to open it.'),
+          pathEl, listEl, selEl),
+        foot: [h('div', { class: 'left' }, countEl), btn('Cancel', null, () => m.close()), doneBtn],
+        onClose: () => resolve(result),
       });
-      load(cur);
+      renderSel();
+      load('');
     });
   }
 

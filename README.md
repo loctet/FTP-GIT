@@ -35,7 +35,7 @@ When you push to `main`, the app uploads the changed files of the folders you ma
 - The app shows a live progress bar, the deployment history, and full logs.
 - **Manual sync, whenever you want:**
   - *Sync changes* uploads what changed since the last deployed commit.
-  - The **Sync** button on each mapping (or *Sync files…* for all mappings) uploads every file of that folder. You can limit it to a sub-folder picked from the repository tree.
+  - The **Sync** button on each mapping (or *Sync files…* for all mappings) uploads every file of that folder. You can limit it to one or several sub-folders: tick them in the folder browser, or type them in.
   - **Preview** shows exactly what will be uploaded first.
   - Optional **mirror** mode also deletes server files that are not in git. It never deletes files that match the exclude patterns or folders that belong to other mappings, and it never mirrors your whole home folder.
 - Deploys come from a private clone, so uncommitted work is never uploaded and line endings are kept byte for byte.

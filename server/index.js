@@ -542,7 +542,7 @@ app.post('/api/repos/:id/sync', wrap(async (req, res) => {
 app.post('/api/repos/:id/sync-scope', wrap(async (req, res) => {
   const r = findRepo(req.params.id);
   const b = req.body || {};
-  const scope = { mappingIds: b.mappingIds, mappingId: b.mappingId, subPath: b.subPath, mirror: b.mirror, runCommand: b.runCommand };
+  const scope = { mappingIds: b.mappingIds, mappingId: b.mappingId, subPath: b.subPath, subPaths: b.subPaths, mirror: b.mirror, runCommand: b.runCommand };
   if (b.dryRun) return res.json(await gitSync.previewScoped(r, scope));
   const { deploymentId, promise } = gitSync.syncScoped(r, scope);
   if (b.wait) {
