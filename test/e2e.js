@@ -514,43 +514,43 @@ async function startFtp() {
   console.log('SSH home folder (shared-hosting layout: unreadable "/")');
   const HOME_PORT = SFTP_PORT + 1;
   const HOME_ROOT = path.join(TMP, 'sftp-home-root');
-  const homeSrv = await startSftpServer({ port: HOME_PORT, root: HOME_ROOT, user: 'ovh', password: 'ovh-pass', home: '/homez.42/ovh', lockRoot: true });
+  const homeSrv = await startSftpServer({ port: HOME_PORT, root: HOME_ROOT, user: 'shared', password: 'shared-pass', home: '/home/shared', lockRoot: true });
   let hid;
   await step('new SSH connection starts in the home folder, not "/"', async () => {
-    const c = await api('POST', '/api/connections', { protocol: 'ssh', host: '127.0.0.1', port: HOME_PORT, user: 'ovh', password: 'ovh-pass' });
+    const c = await api('POST', '/api/connections', { protocol: 'ssh', host: '127.0.0.1', port: HOME_PORT, user: 'shared', password: 'shared-pass' });
     hid = c.id;
     assert(c.remoteRoot === '~', `remoteRoot ${c.remoteRoot}`);
-    fs.mkdirSync(path.join(HOME_ROOT, 'homez.42', 'ovh', 'erp-api'), { recursive: true });
+    fs.mkdirSync(path.join(HOME_ROOT, 'home', 'shared', 'site-api'), { recursive: true });
     const l = await api('GET', `/api/ftp/${hid}/list`);
-    assert(l.path === '/homez.42/ovh' && l.entries.some((e) => e.name === 'erp-api' && e.path === '/homez.42/ovh/erp-api'), JSON.stringify(l));
+    assert(l.path === '/home/shared' && l.entries.some((e) => e.name === 'site-api' && e.path === '/home/shared/site-api'), JSON.stringify(l));
   });
-  await step('"~/x" paths resolve to the home folder; "/" is refused like on OVH', async () => {
-    const l = await api('GET', `/api/ftp/${hid}/list?path=${encodeURIComponent('~/erp-api')}`);
-    assert(l.path === '/homez.42/ovh/erp-api', l.path);
+  await step('"~/x" paths resolve to the home folder; "/" is refused like on shared hosting', async () => {
+    const l = await api('GET', `/api/ftp/${hid}/list?path=${encodeURIComponent('~/site-api')}`);
+    assert(l.path === '/home/shared/site-api', l.path);
     const r = await fetch(`${APP}/api/ftp/${hid}/list?path=/`);
     assert(r.status === 403, `root -> ${r.status}`);
   });
-  await step('upload into "~/erp-api" lands in the home folder', async () => {
+  await step('upload into "~/site-api" lands in the home folder', async () => {
     const fd = new FormData();
     fd.append('relpath', 'index.php');
     fd.append('files', new Blob(['<?php echo 1;']), 'index.php');
-    const up = await fetch(`${APP}/api/ftp/${hid}/upload?path=${encodeURIComponent('~/erp-api')}&tid=h1`, { method: 'POST', body: fd }).then((x) => x.json());
-    assert(up.results[0].ok && up.results[0].path === '/homez.42/ovh/erp-api/index.php', JSON.stringify(up));
-    assert(fs.existsSync(path.join(HOME_ROOT, 'homez.42', 'ovh', 'erp-api', 'index.php')), 'on disk');
+    const up = await fetch(`${APP}/api/ftp/${hid}/upload?path=${encodeURIComponent('~/site-api')}&tid=h1`, { method: 'POST', body: fd }).then((x) => x.json());
+    assert(up.results[0].ok && up.results[0].path === '/home/shared/site-api/index.php', JSON.stringify(up));
+    assert(fs.existsSync(path.join(HOME_ROOT, 'home', 'shared', 'site-api', 'index.php')), 'on disk');
   });
-  await step('git deploy to "~/erp-frontend" + post-deploy command in that folder', async () => {
+  await step('git deploy to "~/site-front" + post-deploy command in that folder', async () => {
     const info = await api('POST', '/api/git/inspect', { source: WORK });
     const r = await api('POST', '/api/repos', {
-      name: 'erp-frontend', url: info.url, branch: 'main', connectionId: hid,
-      mappings: [{ local: 'dist', remote: '~/erp-frontend' }], pollSec: 3600, initialDeploy: true,
+      name: 'site-front', url: info.url, branch: 'main', connectionId: hid,
+      mappings: [{ local: 'dist', remote: '~/site-front' }], pollSec: 3600, initialDeploy: true,
       postDeployCommand: 'echo built> built.txt',
     });
-    assert(r.mappings[0].remote === '~/erp-frontend', r.mappings[0].remote);
+    assert(r.mappings[0].remote === '~/site-front', r.mappings[0].remote);
     const dep = await waitFor(() => db.deployments.find((d) => d.repoId === r.id && d.status !== 'running'), 30000, 200, 'home deploy');
     assert(dep.status === 'success', dep.log.map((l) => l.message).join('\n'));
-    const target = path.join(HOME_ROOT, 'homez.42', 'ovh', 'erp-frontend');
+    const target = path.join(HOME_ROOT, 'home', 'shared', 'site-front');
     assert(fs.existsSync(path.join(target, 'index.html')), 'deployed into home');
-    assert(fs.readFileSync(path.join(target, 'built.txt'), 'utf8').trim() === 'built', 'command ran in ~/erp-frontend');
+    assert(fs.readFileSync(path.join(target, 'built.txt'), 'utf8').trim() === 'built', 'command ran in ~/site-front');
     await api('DELETE', `/api/repos/${r.id}`);
   });
   await step('relative and "~" paths are normalized consistently', async () => {
@@ -558,7 +558,7 @@ async function startFtp() {
     const cases = [
       [resolveRemotePath('/h/u', '~'), '/h/u'], [resolveRemotePath('/h/u', ''), '/h/u'], [resolveRemotePath('/h/u', '~/a/'), '/h/u/a'],
       [resolveRemotePath('/h/u', 'a/b'), '/h/u/a/b'], [resolveRemotePath('/h/u', '/x/../y'), '/y'], [resolveRemotePath('/', '~/a'), '/a'],
-      [normalizeConfiguredPath('erp-api'), '~/erp-api'], [normalizeConfiguredPath('~/a//b/'), '~/a/b'], [normalizeConfiguredPath('~'), '~'],
+      [normalizeConfiguredPath('site-api'), '~/site-api'], [normalizeConfiguredPath('~/a//b/'), '~/a/b'], [normalizeConfiguredPath('~'), '~'],
       [normalizeConfiguredPath(''), '/'], [normalizeConfiguredPath('', '~'), '~'], [normalizeConfiguredPath('/www/'), '/www'],
     ];
     for (const [got, want] of cases) assert(got === want, `got ${got}, want ${want}`);
@@ -568,7 +568,7 @@ async function startFtp() {
     assert(c && c.remoteRoot === '~' && c.homeStart, JSON.stringify(c));
   });
   // ---------------------------------------------------------------- scoped sync (per mapping / sub-folder / mirror)
-  const H = (...p) => path.join(HOME_ROOT, 'homez.42', 'ovh', ...p);
+  const H = (...p) => path.join(HOME_ROOT, 'home', 'shared', ...p);
   let srepo;
   await step('scoped sync: repo with nested mappings (dist → ~/front, api → ~/front/api)', async () => {
     const info = await api('POST', '/api/git/inspect', { source: WORK });

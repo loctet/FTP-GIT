@@ -1,118 +1,319 @@
+<div align="center">
+
 # FTPGit Studio
 
-FTPGit Studio is a local **FTP / FTPS / SFTP** client with an **SSH terminal** and **Git push-to-deploy**.
-When you push to `main`, the app uploads the changed files of the folders you map to your server. It can then run a command over SSH, if you set one.
+**A modern, local file manager for FTP, FTPS and SSH servers, with Git push-to-deploy built in.**
+
+Browse and edit your server files, open an SSH terminal, and ship your site whenever you `git push`.
+
+[![License: MIT](https://img.shields.io/badge/license-MIT-7c6cff.svg)](LICENSE)
+![Node.js ≥ 18](https://img.shields.io/badge/node-%E2%89%A518-339933.svg?logo=node.js&logoColor=white)
+![Platforms](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-38bdf8.svg)
+![Protocols](https://img.shields.io/badge/protocols-FTP%20%7C%20FTPS%20%7C%20SSH%2FSFTP-22c55e.svg)
+
+![Git Deploy dashboard](docs/screenshots/git-deploy.png)
+
+</div>
+
+---
+
+## Why FTPGit Studio?
+
+Many websites still live on shared hosting or a small VPS, reached through FTP or SSH. Deploying usually means dragging files in an FTP client and hoping nothing was forgotten.
+
+FTPGit Studio links your Git repository to your server instead:
+
+- **You push, it deploys.** Only the files that changed are uploaded, and files you deleted are removed.
+- **Build output too.** It can upload folders that are not in Git, such as a React/Vite `dist` folder.
+- **One app for the server.** A file explorer, a text editor and an SSH terminal sit next to your deploys.
+- **No account, no cloud.** Everything runs on your own computer. Your credentials never leave it.
+
+## Table of contents
+
+- [Features](#features)
+- [Screenshots](#screenshots)
+- [Quick start](#quick-start)
+- [User guide](#user-guide)
+- [How deploys work](#how-deploys-work)
+- [Configuration](#configuration)
+- [Security](#security)
+- [Troubleshooting](#troubleshooting)
+- [Development](#development)
+- [Contributing](#contributing)
+- [License](#license)
 
 ## Features
 
-**File explorer (FTP, FTPS, SFTP)**
-- Browse files with breadcrumbs, back/forward, sortable columns, a filter, and file-type icons.
-- Upload by drag and drop: whole folders, or files dropped onto a sub-folder row. You can also pick files or a folder. Live progress shows in the Transfers panel.
-- Download, rename or move, delete (recursive), create a new folder or a new file, chmod, and copy a path.
-- Edit text files in place: `Ctrl+S` saves, `Tab` indents.
-- Drag rows onto a folder to move them.
-- Keyboard: `Del`, `F2`, `Enter`, `Backspace`, `Ctrl+A`, `F5`, `Alt+←/→`, arrow keys.
-- Right-click context menus. Dark and light themes.
+### 📁 File explorer for FTP, FTPS and SSH (SFTP)
+- **Navigation:** breadcrumbs, back and forward, sortable columns, a quick filter, and file-type icons.
+- **Uploads:** drag and drop files or **whole folders**, including onto a sub-folder row. A transfers panel shows live progress.
+- **File operations:** download, rename or move (also by dragging rows onto a folder), delete (recursive), new folder, new file, `chmod`, and copy path.
+- **Editor:** a built-in text editor (`Ctrl+S` to save) for HTML, CSS, JS, PHP, `.htaccess` and more.
+- **Keyboard shortcuts:** `Del`, `F2`, `Enter`, `Backspace`, `Ctrl+A`, `F5`, `Alt+←/→` and the arrow keys.
+- **Themes:** dark and light.
 
-**SSH**
-- SFTP authentication by password, pasted private key, or key file path (`~/.ssh/id_ed25519`), with an optional passphrase. The SSH agent is also supported.
-- Host keys are checked with **trust on first use**: the SHA256 fingerprint is saved on the first connection. If the server key changes, the connection is blocked with a warning until you choose to trust the new key.
-- **Built-in terminal** (xterm.js), docked under the explorer. It has tabs, can be resized and maximized, and offers *Open terminal here* on any folder.
-- **Post-deploy command** per repository, for example `composer install`, `npm ci`, or clearing a cache. It runs over SSH after each Git deploy, and its output goes into the deploy log.
+### 🖥️ SSH that just works
+- **Login options:** password, pasted private key, key file (`~/.ssh/id_ed25519`, with an optional passphrase), or SSH agent.
+- **Built-in terminal** (xterm.js): tabs, resizing, and *Open terminal here* on any folder.
+- **Home folder:** `~` means your home folder everywhere. That matters on shared hosting, where `/` is not readable.
+- **Host key check:** the server's key is trusted on first use, and you are warned if it ever changes.
+- **Clear login errors:** you see which methods the server accepts, what was tried, and the likely fix.
 
-**Session that never asks for your password again**
-- Credentials and keys are encrypted with AES-256-GCM under `data/`.
-- After **10 minutes of inactivity** the connection closes. You can change this time in Settings. The next action reconnects silently, and a live countdown shows in the header. An idle terminal reconnects when you press a key.
-- A keep-alive runs while you are active. If the server drops the connection, the app reconnects automatically.
-- When you reload the page, you return to the same server and folder.
+### 🚀 Git push-to-deploy
+- **Folder mappings** link a repo folder to a server folder, for example `dist → ~/public_html` or `api → ~/public_html/api`. Exclude patterns let you skip files.
+- **Incremental deploys:** only changed files go up (`git diff`), and deleted files are removed on the server.
+- **Instant or automatic:** a pre-push hook triggers the deploy within seconds of `git push`. Polling also catches pushes from CI or other machines.
+- **Local-folder mappings** upload build output that is not in Git. Automatic deploys send only what changed.
+- **Post-deploy SSH command**, for example `composer install --no-dev` or `php artisan migrate --force`. Its output appears in the deploy log.
+- **Private repositories:** HTTPS with a token, SSH remotes, or your existing Git credential manager.
 
-**Git → server deploy**
-- Add a repository from its local folder or its remote URL. Choose the branch (default `main`) and the connection (FTP, FTPS or SFTP).
-- **Folder mappings**: `dist → /public_html`, `api → /public_html/api`, and so on, plus exclude patterns.
-- **Each mapping has a source:** *Git*, for files of the pushed commit, or *Local folder*, for a folder on this computer such as a React/Vite build output (`frontend/dist`) that is not committed. A local folder can be an absolute path (`D:\project\frontend\dist`) or relative to the repository's local folder. Automatic deploys also send what changed in local folders since the last upload, including deleting stale build files.
-- Only changed files are uploaded (`git diff`). Files deleted in git are deleted on the server. You can turn this off per mapping.
-- The app detects pushes by `git ls-remote` polling. An optional **pre-push hook** makes a deploy start seconds after `git push`.
-- The app shows a live progress bar, the deployment history, and full logs.
-- **Manual sync, whenever you want:**
-  - *Sync changes* uploads what changed since the last deployed commit.
-  - The **Sync** button on each mapping (or *Sync files…* for all mappings) uploads every file of that folder. You can limit it to one or several sub-folders: tick them in the folder browser, or type them in.
-  - **Preview** shows exactly what will be uploaded first.
-  - Optional **mirror** mode also deletes server files that are not in git. It never deletes files that match the exclude patterns or folders that belong to other mappings, and it never mirrors your whole home folder.
-- Deploys come from a private clone, so uncommitted work is never uploaded and line endings are kept byte for byte.
+### 🎯 Manual sync, under your control
+- **Sync buttons:** sync one mapping, **one or several sub-folders**, or everything.
+- **Preview** (a dry run) lists every file and the total size before anything moves.
+- **Mirror mode** replaces a server folder with the source. You confirm the list first. Excluded files and other mappings are never touched.
+- **Deployment history** keeps a full, live-streamed log of every run.
 
-**Activity log**: shows every connection, transfer, SSH command, and deploy, with filters and search.
+### 🔒 Sessions that respect your time
+- **Encrypted credentials:** they are stored with AES-256-GCM, on your machine only.
+- **Idle disconnect, silent reconnect:** after 10 minutes of inactivity (configurable) the connection closes, and the next click reconnects without asking for your password.
+- **No dead connections:** a keep-alive runs while you work, and a dropped connection reconnects on its own.
 
-## Requirements
+## Screenshots
 
-- Node.js 18 or later
-- Git, on your PATH
+| File explorer | SSH terminal |
+|---|---|
+| ![File explorer](docs/screenshots/explorer.png) | ![SSH terminal](docs/screenshots/terminal.png) |
+| **Sync a folder (with preview)** | **Deployment log** |
+| ![Sync dialog](docs/screenshots/sync-dialog.png) | ![Deployment log](docs/screenshots/deploy-log.png) |
+| **New SSH connection** | **Light theme** |
+| ![New connection](docs/screenshots/new-connection.png) | ![Light theme](docs/screenshots/explorer-light.png) |
 
-## Run
+## Quick start
+
+### Requirements
+
+- [Node.js](https://nodejs.org/) **18 or newer**
+- [Git](https://git-scm.com/) available on your `PATH`. On Windows, Git for Windows also provides the `sh` and `curl` used by the push hook.
+
+### Install and run
 
 ```bash
+git clone https://github.com/<your-account>/ftpgit-studio.git
+cd ftpgit-studio
 npm install
 npm start
 ```
 
-`npm start` opens <http://127.0.0.1:4280>. On Windows, you can also double-click `start.bat`.
-To start without opening a browser, run `npm run serve`. To use another port, set `PORT=5000`.
+The app opens at **http://127.0.0.1:4280**.
 
-## Use
+- **Windows:** you can double-click `start.bat` instead. It installs the dependencies on first run.
+- **Without opening a browser:** run `npm run serve`.
 
-1. Click **+** next to *Connections* and pick the connection type. **SSH** is the default. If you only have a host, a user and a password, fill in those three fields. You can also paste `user@host:port` into *Host*, and the app splits it into the right fields for you. Click **Test connection**, then **Save**. An SSH key is optional; it is under *Use an SSH key instead of a password*.
-2. Browse and manage files in **File Explorer**. Drag files from your desktop into the window to upload them. For SFTP, click **Terminal** in the header to open a shell.
-3. Open **Git Deploy** and click **Add repository**:
-   - Enter your project folder, for example `D:\Projects\my-site`. You can also enter a remote URL. Click **Inspect**.
-   - Select the connection and add mappings. Each mapping goes from a repository folder to a server folder; click the folder icon to browse the server. `~` means your home folder on the server, so a mapping can look like `dist → ~/erp-frontend`.
-   - Optionally, set an **After deploy (SSH)** command.
-   - Keep **Install git pre-push hook** checked for instant deploys.
-4. Run `git push origin main`. The changed files appear on the server, and the deploy shows in *Deployment history*.
+### Try it without a real server
 
-## Try it without a real server
+Two local test servers are included:
 
 ```bash
 node test/dev-sftp.js
-```
-
-This starts a local SFTP + SSH server on `127.0.0.1:2222`. The user is `demo` and the password is `demo`.
-
-```bash
 node test/dev-ftp.js
 ```
 
-This starts a local FTP server on `127.0.0.1:2121`, with the same user and password.
+Run each command in its own terminal. Both use the username `demo` and the password `demo`:
+- `dev-sftp.js` is an SSH/SFTP server on `127.0.0.1:2222`.
+- `dev-ftp.js` is an FTP server on `127.0.0.1:2121`.
 
-## Tests
+## User guide
+
+### 1. Add a server
+
+Click **+** next to *Connections* and choose the connection type:
+
+| Type | Use it when you have… | Default port |
+|---|---|---|
+| **SSH** | an SSH/SFTP login, which is also what most VPS and many hosts provide | 22 |
+| **FTP** | a plain FTP account | 21 |
+| **FTPS** | FTP over TLS (explicit or implicit) | 21 / 990 |
+
+- **Shortcut:** paste `user@host:port` into *Host*, and the fields fill themselves.
+- **Check first:** click **Test connection**, then **Save**.
+- **Start folder:** for SSH, `~` (your home folder) is the default start folder.
+
+### 2. Manage files
+
+Open a connection to browse it:
+- **Upload:** drag files or folders from your desktop.
+- **Edit:** double-click a text file.
+- **More actions:** right-click anything.
+- **Terminal (SSH only):** use the **Terminal** button.
+
+### 3. Connect a Git repository
+
+Open **Git Deploy**, then **Add repository**:
+
+1. **Repository:** enter your project folder (for example `D:\projects\my-site`) or a remote URL, then click **Inspect**. A local folder enables the instant push hook.
+2. **Branch:** choose the branch to deploy (default `main`) and the target connection.
+3. **Mappings:** add one per folder. For each, choose a source:
+   - **Git**: a folder inside the repository. Its files come from the pushed commit.
+   - **Local folder**: a folder on your computer, such as `frontend/dist`. Use it for build output that is not committed.
+
+   Then set the server folder, for example `~/public_html`.
+4. **Excludes:** add patterns such as `node_modules/`, `*.map`, `.env`, `uploads/`. Excluded files are never uploaded, and never deleted by mirror mode.
+5. **First deploy:** choose whether to upload everything now, or start from the current commit and deploy only future pushes.
+
+From now on, `git push origin main` deploys automatically.
+
+### 4. Sync manually
+
+Each mapping on the repository card has a **Sync** button, and **Sync files…** covers every mapping:
+
+1. **What to sync:** pick all mappings, one mapping, or one or several **sub-folders**. Tick them in the browser or type them.
+2. **Preview:** check exactly what will be uploaded, and deleted in mirror mode.
+3. **Sync now:** start the upload. The deployment log opens and streams progress.
+
+The other buttons on the card:
+- **Sync changes:** uploads only what changed since the last deployed commit.
+- **⋯ → Redeploy all files:** uploads everything again.
+
+## How deploys work
+
+```mermaid
+flowchart LR
+    A[git push] --> B{pre-push hook<br/>or polling}
+    B --> C[Fetch branch into<br/>private clone]
+    C --> D[git diff since<br/>last deployed commit]
+    D --> E[Apply mappings<br/>and excludes]
+    L[Local build folders<br/>changed files] --> E
+    E --> F[Upload / delete<br/>over FTP, FTPS or SFTP]
+    F --> G[Optional post-deploy<br/>SSH command]
+    G --> H[Record commit<br/>and log]
+```
+
+- **Exact files:** the app deploys from its own private clone, so uncommitted work is never uploaded and files are transferred byte for byte.
+- **Failed deploys:** the deployed commit does not advance, the full log is kept, and the next push (or *Sync changes*) retries.
+- **Rewritten history:** if a force-push rewrote the history, a full deploy runs instead.
+
+More details on each behaviour are in [docs/DESIGN.md](docs/DESIGN.md).
+
+## Configuration
+
+### Settings in the app (Settings page)
+
+| Setting | Default |
+|---|---|
+| Disconnect after inactivity | 10 minutes |
+| Keep-alive interval while active | 60 seconds |
+| Default polling interval for new repositories | 60 seconds |
+| Theme | Dark |
+
+### Environment variables
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `PORT` | `4280` | HTTP port of the local app |
+| `HOST` | `127.0.0.1` | Interface to bind. Keep it local (see [Security](#security)). |
+| `FTPGIT_DATA` | `./data` | Where connections, encrypted secrets, repository clones and logs are stored |
+
+## Security
+
+FTPGit Studio is a **single-user tool that runs on your own machine**.
+
+- **Local only:** it listens on `127.0.0.1` and rejects requests whose `Host` header is foreign, which blocks DNS-rebinding attacks. Terminal WebSockets from other origins are rejected too.
+- **Secrets stay encrypted:** passwords, private keys, passphrases and Git tokens are encrypted at rest with AES-256-GCM. They are never sent back to the browser.
+- **Your data folder:** the key is `data/secret.key`. Treat the whole `data/` folder as sensitive: don't commit it (it is already in `.gitignore`), and back it up privately.
+- **SSH host keys** are verified (trust on first use). A changed key blocks the connection until you approve it.
+- **No authentication:** the app has no login of its own. **Don't expose it on a network** (`HOST=0.0.0.0`) unless you put it behind an authenticating proxy.
+
+Found a vulnerability? Please open a private security advisory on the repository instead of a public issue.
+
+## Troubleshooting
+
+<details>
+<summary><b>"Timed out" when connecting</b></summary>
+
+- **Wrong connection type:** check the type matches the port. SSH usually uses 22, FTP uses 21. If they don't match, the app now says so explicitly.
+- **Network:** make sure a firewall or VPN is not blocking the port.
+</details>
+
+<details>
+<summary><b>"SSH login refused…"</b></summary>
+
+The message lists the methods the server accepts and what was tried:
+- **Password rejected:** click the 👁 button to check the password you typed.
+- **Password not accepted at all:** if the server doesn't list `password`, use an SSH key.
+- **One-time code:** servers that ask for a second factor need key-based login.
+</details>
+
+<details>
+<summary><b>Connected, but the folder can't be listed</b></summary>
+
+Over SSH, `/` is the whole server's root folder, and shared hosts often don't let you read it. Use `~` (your home folder) as the start folder, which is the default for new SSH connections. Use `~/…` for mapping targets.
+</details>
+
+<details>
+<summary><b>"0 files to upload"</b></summary>
+
+- **Build output:** for a folder that isn't committed, like `dist`, set the mapping source to **Local folder** and run your build first.
+- **Git mappings:** they deploy the latest **pushed** commit, so local changes you haven't pushed are not included.
+- **Excludes:** check your exclude patterns.
+</details>
+
+<details>
+<summary><b>A yellow banner says to restart</b></summary>
+
+The app's files were updated while it was running. Stop it (close the window or press `Ctrl+C`) and run `npm start` again.
+</details>
+
+<details>
+<summary><b>"HOST KEY CHANGED"</b></summary>
+
+The server presented a different SSH key than the one saved on the first connection:
+- **Expected change:** after a reinstall or migration, choose **Trust new host key**.
+- **Unexpected change:** contact your host before going further.
+</details>
+
+## Development
+
+```text
+server/
+  index.js        HTTP API, static UI, startup migrations
+  remote.js       protocol adapters: FTP/FTPS (basic-ftp) and SSH/SFTP (ssh2)
+  ftpManager.js   sessions: queue, idle disconnect, keep-alive, auto-reconnect, host keys
+  terminal.js     WebSocket ⇄ SSH shell bridge for the web terminal
+  gitSync.js      polling, diff, mappings, local folders, scoped sync, mirror, deploys, push hook
+  store.js        JSON store and AES-256-GCM secrets
+  events.js       Server-Sent Events and activity log
+public/           UI (vanilla JavaScript, no build step)
+test/
+  e2e.js          end-to-end test suite
+  dev-ftp.js      local FTP server
+  dev-sftp.js     local SSH/SFTP server (can emulate shared hosting, keyboard-interactive and OTP logins)
+docs/             design notes and screenshots
+```
+
+### Run the tests
 
 ```bash
 npm test
 ```
 
-The end-to-end test starts a real FTP server, a real SFTP/SSH server, and a bare Git remote. It checks 40 scenarios through the HTTP API and the terminal WebSocket:
-- **File operations, FTP and SFTP:** upload, edit, download, rename (including overwrite), chmod, and recursive delete.
-- **Sessions:** idle disconnect followed by a silent reconnect, and recovery after a dropped socket.
-- **SSH:** password, pasted-key, and key-file authentication; rejection of a wrong key; host-key change detection; exec; and the terminal round-trip and its origin check.
-- **Git deploy:** baseline, full deploy, a deploy triggered by the pre-push hook, polling, branch filtering, excludes, deploy over SFTP, and the post-deploy command, both success and failure.
+The end-to-end suite starts real FTP and SSH servers and a bare Git remote, then drives the HTTP API and the terminal WebSocket. It covers:
+- file operations over FTP and SFTP;
+- idle reconnect;
+- SSH authentication and host keys;
+- push-hook and polling deploys;
+- local-folder mappings;
+- scoped and mirror syncs;
+- security checks.
 
-## Data and security
+## Contributing
 
-- All data is stored in `data/`: `db.json`, `secret.key` (encryption key), the private repository clones, and temporary upload files. Keep this folder private and do not commit it. It is in `.gitignore`.
-- The server listens on `127.0.0.1` only. It rejects requests whose `Host` header is foreign, and terminal WebSockets that come from another origin. There is no login, because the app is meant for one user on a local machine.
-- Passwords, keys and tokens are never sent back to the browser.
-- See [QUESTIONS.md](QUESTIONS.md) for the design decisions and their reasons.
+Issues and pull requests are welcome.
 
-## Project layout
+1. Fork the repository and create a branch.
+2. Keep the existing code style: vanilla JS, no build step, small focused modules.
+3. Add or update tests in `test/e2e.js`, and make sure `npm test` passes.
+4. Open a pull request that describes the change and how you tested it.
 
-```
-server/index.js        HTTP API + static UI
-server/remote.js       protocol adapters: FTP/FTPS (basic-ftp) and SFTP/SSH (ssh2)
-server/ftpManager.js   sessions: queue, idle disconnect, keep-alive, auto-reconnect, host-key trust
-server/terminal.js     WebSocket <-> SSH shell bridge for the web terminal
-server/gitSync.js      git polling, diff, mapping/exclude planner, deploy, push hook, post-deploy command
-server/store.js        JSON store + AES-256-GCM secrets
-server/events.js       Server-Sent Events + activity log
-public/                UI (vanilla JS, no build step; xterm.js served from node_modules)
-test/e2e.js            end-to-end test
-test/dev-sftp.js       local SFTP/SSH server for trying the app
-test/dev-ftp.js        local FTP server for trying the app
-```
+## License
+
+[MIT](LICENSE) — free to use, modify and distribute.

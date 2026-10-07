@@ -1,16 +1,34 @@
 {
   "name": "ftpgit-studio",
   "version": "1.0.0",
-  "description": "Local FTP/FTPS/SFTP client with SSH terminal and Git push-to-deploy",
+  "private": true,
+  "description": "Local FTP / FTPS / SSH file manager with a web UI, SSH terminal and Git push-to-deploy",
+  "keywords": [
+    "ftp",
+    "ftps",
+    "sftp",
+    "ssh",
+    "deploy",
+    "git",
+    "git-deploy",
+    "push-to-deploy",
+    "file-manager",
+    "terminal",
+    "shared-hosting",
+    "vite",
+    "react"
+  ],
+  "author": "Elvis KONJOH",
+  "license": "MIT",
   "main": "server/index.js",
   "scripts": {
     "start": "node server/index.js --open",
     "serve": "node server/index.js",
     "test": "node test/e2e.js"
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
+  "engines": {
+    "node": ">=18"
+  },
   "type": "commonjs",
   "dependencies": {
     "@xterm/addon-fit": "^0.11.0",
@@ -23,9 +41,5 @@
   },
   "devDependencies": {
     "ftp-srv": "^4.6.3"
-  },
-  "engines": {
-    "node": ">=18"
-  },
-  "private": true
+  }
 }

@@ -404,7 +404,7 @@
       updateSessionPill();
     } else if (S.view === 'deploy') {
       setKids(tb, 
-        h('div', null, h('h1', null, 'Git Deploy'), h('div', { class: 'sub' }, 'Push to your branch — mapped folders are uploaded to FTP automatically')),
+        h('div', null, h('h1', null, 'Git Deploy'), h('div', { class: 'sub' }, 'Push to your branch — mapped folders are uploaded to your server automatically')),
         h('div', { class: 'spacer' }),
         btn('Check all now', 'refresh', checkAll),
         btn('Add repository', 'plus', () => openRepoForm(), 'primary')
@@ -682,7 +682,7 @@
         ftpsBox,
         h('div', { class: 'grid-2' },
           h('div', { class: 'field' }, h('label', null, 'Display name'), f.name),
-          h('div', { class: 'field' }, h('label', null, 'Start folder'), f.remoteRoot, h('div', { class: 'hint' }, '~ = your home folder, e.g. ~/erp-api'))),
+          h('div', { class: 'field' }, h('label', null, 'Start folder'), f.remoteRoot, h('div', { class: 'hint' }, '~ = your home folder, e.g. ~/public_html'))),
         h('div', { class: 'callout' }, icon('lock'), h('div', null, 'Passwords and keys are encrypted (AES-256-GCM) and stored only on this computer. The app reconnects with them automatically, so you never log in again after an idle disconnect.')),
         result,
         h('button', { type: 'submit', hidden: true })
@@ -1463,7 +1463,7 @@
     const items = list.map((j) => {
       const pct = j.total ? (j.phase === 'sending' ? j.sent / j.total : j.ftp / j.total) * 100 : j.status === 'running' ? 0 : 100;
       let sub;
-      if (j.status === 'running') sub = j.phase === 'sending' ? `Sending to app · ${Math.round(pct)}%` : `Uploading to FTP · ${Math.round(pct)}% ${j.current ? '· ' + j.current : ''}`;
+      if (j.status === 'running') sub = j.phase === 'sending' ? `Sending to app · ${Math.round(pct)}%` : `Uploading to server · ${Math.round(pct)}% ${j.current ? '· ' + j.current : ''}`;
       else if (j.status === 'done') sub = `Done · ${j.ok} file${j.ok > 1 ? 's' : ''} · ${fmtSize(j.total)}`;
       else sub = `${j.failures.length} failed · ${j.ok} uploaded`;
       return h('div', { class: 'tr-item' },
@@ -1523,8 +1523,8 @@
     if (!S.repos.length) {
       setKids(ct, stats, h('div', { class: 'card' }, h('div', { class: 'empty' }, h('div', null,
         h('div', { class: 'big' }, icon('git')),
-        h('h3', null, 'Deploy to FTP on every push'),
-        h('p', null, 'Link a Git repository, choose which folders go to which FTP folders, and every push to your branch (main by default) is uploaded automatically — only the changed files.'),
+        h('h3', null, 'Deploy to your server on every push'),
+        h('p', null, 'Link a Git repository, choose which folders go to which server folders, and every push to your branch (main by default) is uploaded automatically — only the changed files.'),
         S.connections.length ? btn('Add repository', 'plus', () => openRepoForm(), 'primary') : btn('First, add an FTP connection', 'server', () => openConnectionForm(), 'primary')))));
       return;
     }
@@ -1564,7 +1564,7 @@
         h('div', { class: 'k' }, 'Deployed'), h('div', { class: 'v' }, h('span', { class: 'chip' }, short(r.lastDeployedSha)), ' ', h('span', { class: 'hint' }, r.lastDeployedAt ? timeAgo(r.lastDeployedAt) : r.lastDeployedSha ? 'baseline' : 'not yet')),
         pending ? [h('div', { class: 'k' }, 'Remote head'), h('div', { class: 'v' }, h('span', { class: 'chip' }, short(r.lastRemoteSha)), ' ', h('span', { class: 'hint' }, 'not deployed yet'))] : null,
         h('div', { class: 'k' }, 'Last check'), h('div', { class: 'v hint' }, `${timeAgo(r.lastCheckedAt)} · every ${r.pollSec}s${r.localPath ? ' + push hook' : ''}`)),
-      h('div', { class: 'mappings' }, r.mappings.map((m) => h('div', { class: 'mapping', title: m.deleteRemoved ? 'Files deleted in git are deleted on FTP' : 'Deletions are not synced' },
+      h('div', { class: 'mappings' }, r.mappings.map((m) => h('div', { class: 'mapping', title: m.deleteRemoved ? 'Files deleted at the source are deleted on the server' : 'Deletions are not synced' },
         icon(isLocalMap(m) ? 'server' : 'git'), h('span', { title: isLocalMap(m) ? 'Folder on this computer (not from git)' : 'Folder in the repository' }, mappingSource(m)), icon('arrow-right'), h('span', null, m.remote),
         isLocalMap(m) ? h('span', { class: 'badge info' }, 'local folder') : null,
         h('span', { class: 'grow' }),
@@ -1823,7 +1823,7 @@
   }
 
   async function syncRepo(r, full) {
-    if (full && !(await confirmDialog({ title: 'Redeploy all files?', message: `Every file in the mapped folders of ${r.name} (${r.branch}) will be uploaded to FTP again, overwriting the remote copies.`, confirmText: 'Redeploy', iconName: 'rocket' }))) return;
+    if (full && !(await confirmDialog({ title: 'Redeploy all files?', message: `Every file in the mapped folders of ${r.name} (${r.branch}) will be uploaded to the server again, overwriting the remote copies.`, confirmText: 'Redeploy', iconName: 'rocket' }))) return;
     try {
       await api('POST', `/api/repos/${r.id}/sync`, { full });
       toast('info', full ? 'Full redeploy started' : 'Checking for new commits…', r.name);
@@ -1845,7 +1845,7 @@
   }
 
   async function deleteRepo(r) {
-    if (!(await confirmDialog({ title: `Remove ${r.name}?`, message: 'Stops syncing this repository and removes its local cache and push hook. Files on FTP and your repository are not touched.', confirmText: 'Remove', danger: true }))) return;
+    if (!(await confirmDialog({ title: `Remove ${r.name}?`, message: 'Stops syncing this repository and removes its local cache and push hook. Files on the server and your repository are not touched.', confirmText: 'Remove', danger: true }))) return;
     try { await api('DELETE', `/api/repos/${r.id}`); toast('success', 'Repository removed'); } catch (e) { toast('error', 'Failed', e.message); }
   }
 
@@ -1921,12 +1921,12 @@
           });
           syncSrc();
           const remote = h('input', { class: 'input mono', value: m.remote, placeholder: '~/public_html  or  /absolute/path', oninput: (ev) => (m.remote = ev.target.value) });
-          const del = h('label', { class: 'switch', title: 'Delete files on FTP when they are deleted in git' }, h('input', { type: 'checkbox', checked: m.deleteRemoved !== false, onchange: (ev) => (m.deleteRemoved = ev.target.checked) }), h('span'));
+          const del = h('label', { class: 'switch', title: 'Delete files on the server when they are deleted at the source' }, h('input', { type: 'checkbox', checked: m.deleteRemoved !== false, onchange: (ev) => (m.deleteRemoved = ev.target.checked) }), h('span'));
           return h('div', { class: 'map-row' },
             srcSel,
             local,
             h('span', { class: 'arrow' }, icon('arrow-right')),
-            h('div', { class: 'row' }, remote, ibtn('folder', 'Browse FTP folders', async () => {
+            h('div', { class: 'row' }, remote, ibtn('folder', 'Browse server folders', async () => {
               const p = await pickRemoteFolder(f.connectionId.value, remote.value || '/');
               if (p) { remote.value = p; m.remote = p; }
             })),
@@ -2024,7 +2024,7 @@
           h('div', { class: 'field' }, h('label', null, 'Local folder (for push hook)'), f.localPath)),
         details,
         h('div', { class: 'field' }, h('label', null, 'Deploy to connection (FTP, FTPS or SFTP)'), f.connectionId),
-        h('div', { class: 'field' }, h('label', null, 'Folder mappings — repository folder → FTP folder'), mapHost),
+        h('div', { class: 'field' }, h('label', null, 'Folder mappings — source folder → server folder'), mapHost),
         h('div', { class: 'grid-2' },
           h('div', { class: 'field' }, h('label', null, 'Exclude (one pattern per line)'), f.excludes, h('div', { class: 'hint' }, 'Glob patterns: node_modules/, *.map, src/**/*.test.js')),
           h('div', { class: 'stack' },
@@ -2060,7 +2060,7 @@
         }
       };
       const m = modal({
-        title: 'Choose FTP folder', iconName: 'folder',
+        title: 'Choose server folder', iconName: 'folder',
         body: h('div', { class: 'stack' }, pathEl, listEl),
         foot: [
           h('div', { class: 'left' }, btn('New folder', 'folder-plus', async () => {
