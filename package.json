@@ -1,0 +1,27 @@
+{
+  "name": "ftpgit-studio",
+  "version": "1.0.0",
+  "description": "Local FTP client with Git push-to-deploy",
+  "main": "server/index.js",
+  "scripts": {
+    "start": "node server/index.js --open",
+    "serve": "node server/index.js",
+    "test": "node test/e2e.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "basic-ftp": "^6.2.2",
+    "express": "^5.2.1",
+    "multer": "^2.4.0"
+  },
+  "devDependencies": {
+    "ftp-srv": "^4.6.3"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "private": true
+}

@@ -1,0 +1,23 @@
+# Questions & Answers Log
+
+You asked me to build the whole app without stopping and to log any questions here.
+These are the decisions I would normally have asked about, with the answer I chose.
+Every one of them can be changed later. Most are settings in the UI.
+
+| # | Question | Answer / decision taken |
+|---|----------|-------------------------|
+| 1 | Desktop app (Electron) or local web app? | **Local web app**: a Node.js server bound to `127.0.0.1:4280`, with the UI in your browser. No native build tools, it starts in under a second, and `npm start` opens the browser. |
+| 2 | Which protocols? FTP, FTPS, SFTP? | **FTP + FTPS (explicit TLS and implicit TLS)**. SFTP (SSH) is a different protocol and is not included. The FTP layer is isolated in `server/ftpManager.js`, so SFTP can be added later. |
+| 3 | What does "session not expiring" mean in practice? | The app has **no login screen and no session expiry**. Connections are saved with the password **encrypted with AES-256-GCM** under `data/`. After a page reload, the app reopens the same server and the same folder. |
+| 4 | How should "disconnect after 10 min of inactivity" behave? | Each saved server has one explorer FTP session. After **10 minutes with no user action** (configurable in Settings), the FTP socket closes and the status shows *Sleeping (idle)*. The next click **reconnects silently with the stored credentials**, so you never type them again. While you are active, a NOOP keep-alive is sent every 60 s, so the server does not drop you earlier. If the server drops the socket anyway, the app reconnects and retries once. |
+| 5 | How is "push to main" detected? A GitHub webhook needs a public URL. | Two mechanisms are used together, with no public URL needed. **(a) Polling**: `git ls-remote` runs every N seconds (default 60). It is very light and catches pushes from any machine or CI. **(b) Optional pre-push hook**: it is installed in your local clone and pings the app when you push the watched branch, so the deploy starts within seconds. Any existing `pre-push` hook is kept and chained. |
+| 6 | Which branch? | Default is **`main`**. You can set it per repository, for example `master` or `production`. Pushes to other branches are ignored. |
+| 7 | How are files sent: everything or only changes? | **Only the changed files**: the app runs `git diff` between the last deployed commit and the new one. Added and modified files are uploaded. Deleted files are deleted on FTP, and you can turn this off per mapping. A **Redeploy all** button uploads everything. If history was rewritten by a force-push, the app falls back to a full deploy automatically. |
+| 8 | "Specify which folder syncs to which FTP folder" | Each repository has **multiple mappings**: `repo folder → FTP folder`, for example `dist → /public_html` and `api → /public_html/api`. An empty repo folder means the whole repository. An FTP folder picker is included. **Exclude patterns** are supported, for example `node_modules/`, `*.map`, `.env`. |
+| 9 | When a repo is first added, should all current files be uploaded? | **No by default (safe)**. The current commit becomes the *baseline* and only later pushes are uploaded. A checkbox, *Upload all current files now*, does a full first deploy. |
+| 10 | Should the app deploy from my working folder? | **No.** The app keeps its own private clone under `data/repos/`, so uncommitted local edits are never uploaded. It deploys exactly what was pushed, byte for byte. `core.autocrlf` is forced off, so Windows never rewrites line endings. |
+| 11 | Private repositories? | SSH remotes and HTTPS remotes use your existing Git credentials (Git Credential Manager). You can also store an access token per repository, encrypted. It is sent as an HTTP header and is never written into the remote URL. |
+| 12 | What if a deploy fails halfway? | The deploy is marked **Failed** with a full log, and the "last deployed" commit does **not** advance. The app does not retry the same failed commit in a loop. The next push, or **Sync now**, retries it. |
+| 13 | Security of a local server? | The app listens on **127.0.0.1 only** and rejects requests with a foreign `Host` header (DNS-rebinding protection). Passwords and tokens are never sent back to the browser. To expose it on a LAN, set `HOST=0.0.0.0`, at your own risk. There is no authentication. |
+| 14 | Folder download? | Not included. You can download multiple files, but not a whole folder as a zip. |
+| 15 | Large uploads? | Files are streamed from disk, and uploads are batched (100 files / 256 MB per request). The panel shows two-phase progress: browser → app, then app → FTP. Uploads and downloads use their own FTP connection, so browsing stays responsive. |
