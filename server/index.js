@@ -10,7 +10,7 @@ const events = require('./events');
 const ftpm = require('./ftpManager');
 const gitSync = require('./gitSync');
 const terminal = require('./terminal');
-const { isSftp } = require('./remote');
+const { isSftp, resolveRemotePath, normalizeConfiguredPath } = require('./remote');
 
 const PORT = Number(process.env.PORT) || 4280;
 const HOST = process.env.HOST || '127.0.0.1';
@@ -70,10 +70,11 @@ function connectionFromBody(body, existing = {}) {
     user: String(body.user ?? existing.user ?? '').trim(),
     secure,
     allowSelfSigned: protocol === 'ftp' && !!(body.allowSelfSigned ?? existing.allowSelfSigned),
-    remoteRoot: remotePath(body.remoteRoot ?? existing.remoteRoot ?? '/'),
+    remoteRoot: normalizeConfiguredPath(body.remoteRoot ?? existing.remoteRoot, protocol === 'sftp' ? '~' : '/'),
     color: body.color ?? existing.color ?? null,
   };
-  if (protocol === 'sftp' && !out.user) throw httpError(400, 'Username is required for SFTP');
+  if (protocol === 'sftp' && !out.user) throw httpError(400, 'Username is required for SSH');
+  if (protocol === 'sftp') out.homeStart = true; // start folder chosen with "~" support: never migrate it
   if (typeof body.password === 'string' && (body.password !== '' || body.clearPassword)) out.passwordEnc = body.password ? encrypt(body.password) : null;
   if (protocol === 'sftp') {
     if (body.keyPath !== undefined) out.keyPath = String(body.keyPath || '').trim() || null;
@@ -120,13 +121,21 @@ app.put('/api/settings', (req, res) => {
 // Connections saved before SSH support had no protocol field. Port 22 is SSH in practice,
 // so upgrade those instead of letting FTP hang on an SSH port.
 for (const c of db.connections) {
-  if (c.protocol) continue;
-  c.protocol = Number(c.port) === 22 ? 'sftp' : 'ftp';
-  if (c.protocol === 'sftp') {
-    c.secure = 'none';
-    events.activity('info', 'app', `Connection "${c.name}" uses port 22, so it was switched to SSH`);
+  if (!c.protocol) {
+    c.protocol = Number(c.port) === 22 ? 'sftp' : 'ftp';
+    if (c.protocol === 'sftp') {
+      c.secure = 'none';
+      events.activity('info', 'app', `Connection "${c.name}" uses port 22, so it was switched to SSH`);
+    }
+    save();
   }
-  save();
+  // SSH connections created before "~" support defaulted to "/", the filesystem root. Shared
+  // hosts (OVH, o2switch, …) don't let you read it, so start in the home folder instead.
+  if (c.protocol === 'sftp' && !c.homeStart) {
+    if (!c.remoteRoot || c.remoteRoot === '/') c.remoteRoot = '~';
+    c.homeStart = true;
+    save();
+  }
 }
 
 // Detects "code updated on disk but the running server is still the old one".
@@ -215,9 +224,11 @@ app.post('/api/connections/:id/exec', wrap(async (req, res) => {
   if (!isSftp(conn)) throw httpError(400, 'Commands need an SSH connection.');
   const command = String(req.body?.command || '').trim();
   if (!command) throw httpError(400, 'Command is required');
-  const cwd = req.body?.cwd ? remotePath(req.body.cwd) : null;
   ftpm.session(conn.id).touch();
-  const result = await ftpm.withClient(conn.id, (client) => client.exec(command, { cwd, timeoutMs: 5 * 60 * 1000 }));
+  const result = await ftpm.withClient(conn.id, (client) => {
+    const cwd = req.body?.cwd ? resolveRemotePath(client.home, req.body.cwd) : null;
+    return client.exec(command, { cwd, timeoutMs: 5 * 60 * 1000 });
+  });
   events.activity(result.code === 0 ? 'success' : 'warn', 'ssh', `$ ${command.length > 80 ? command.slice(0, 80) + '…' : command} → exit ${result.code}`, { connectionId: conn.id });
   res.json(result);
 }));
@@ -233,8 +244,11 @@ app.post('/api/connections/:id/disconnect', (req, res) => {
 app.get('/api/ftp/:id/list', wrap(async (req, res) => {
   const conn = ftpm.getConnection(req.params.id);
   const s = ftpm.session(req.params.id);
-  const dir = remotePath(req.query.path, conn.remoteRoot || '/');
-  const list = await s.run((c) => c.list(dir));
+  const wanted = req.query.path || conn.remoteRoot || (isSftp(conn) ? '~' : '/');
+  const { dir, list } = await s.run(async (c) => {
+    const d = resolveRemotePath(c.home, wanted);
+    return { dir: d, list: await c.list(d) };
+  });
   const entries = list
     .map((f) => ({ ...f, path: path.posix.join(dir, f.name) }))
     .sort((a, b) => (a.type === 'dir') === (b.type === 'dir') ? a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' }) : a.type === 'dir' ? -1 : 1);
@@ -344,7 +358,8 @@ app.post('/api/ftp/:id/upload', upload.array('files'), wrap(async (req, res) => 
   const cleanup = () => files.forEach((f) => fs.rm(f.path, { force: true }, () => {}));
   try {
     const conn = ftpm.getConnection(req.params.id);
-    const dir = remotePath(req.query.path, conn.remoteRoot || '/');
+    const wanted = req.query.path || conn.remoteRoot || (isSftp(conn) ? '~' : '/');
+    let dir = wanted;
     const tid = String(req.query.tid || id('tr'));
     let rel = req.body.relpath ?? [];
     if (!Array.isArray(rel)) rel = [rel];
@@ -354,6 +369,7 @@ app.post('/api/ftp/:id/upload', upload.array('files'), wrap(async (req, res) => 
     let doneBytes = 0;
     s.touch();
     await ftpm.withClient(req.params.id, async (client) => {
+      dir = resolveRemotePath(client.home, wanted);
       const madeDirs = new Set();
       for (let i = 0; i < files.length; i++) {
         const f = files[i];

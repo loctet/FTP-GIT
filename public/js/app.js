@@ -532,7 +532,7 @@
       port: h('input', { class: 'input mono', type: 'number', value: e.port || 22, min: 1, max: 65535 }),
       user: h('input', { class: 'input mono', value: e.user || '', placeholder: 'username', autocomplete: 'off', spellcheck: 'false' }),
       password: h('input', { class: 'input mono', type: 'password', placeholder: isEdit && e.hasPassword ? '•••••••• (saved — leave empty to keep)' : 'password', autocomplete: 'new-password' }),
-      remoteRoot: h('input', { class: 'input mono', value: e.remoteRoot || '/', placeholder: '/' }),
+      remoteRoot: h('input', { class: 'input mono', value: e.remoteRoot || (isEdit && !isSftpConn(e) ? '/' : '~'), placeholder: '~' }),
       allowSelfSigned: h('input', { type: 'checkbox', checked: !!e.allowSelfSigned }),
       privateKey: h('textarea', { class: 'textarea', rows: 4, spellcheck: 'false', placeholder: e.hasPrivateKey ? 'A private key is saved. Paste a new one to replace it.' : '-----BEGIN OPENSSH PRIVATE KEY-----\n…\n-----END OPENSSH PRIVATE KEY-----' }),
       keyPath: h('input', { class: 'input mono', value: e.keyPath || '', placeholder: 'C:\\Users\\you\\.ssh\\id_ed25519   or   ~/.ssh/id_ed25519', spellcheck: 'false' }),
@@ -597,6 +597,9 @@
       ftpsBox.style.display = p.startsWith('ftps') ? '' : 'none';
       pwLabel.textContent = p === 'sftp' ? 'SSH password' : 'Password';
       f.host.placeholder = p === 'sftp' ? 'server.example.com  or  user@1.2.3.4:22' : 'ftp.example.com';
+      // SSH: "/" is the real filesystem root (often unreadable on shared hosting) → start at home "~".
+      if (p === 'sftp' && (f.remoteRoot.value.trim() === '/' || !f.remoteRoot.value.trim())) f.remoteRoot.value = '~';
+      if (p !== 'sftp' && !f.remoteRoot.value.trim()) f.remoteRoot.value = '/';
       renderTypeCards();
     }
     setProto(proto);
@@ -668,7 +671,7 @@
         ftpsBox,
         h('div', { class: 'grid-2' },
           h('div', { class: 'field' }, h('label', null, 'Display name'), f.name),
-          h('div', { class: 'field' }, h('label', null, 'Start folder'), f.remoteRoot)),
+          h('div', { class: 'field' }, h('label', null, 'Start folder'), f.remoteRoot, h('div', { class: 'hint' }, '~ = your home folder, e.g. ~/erp-api'))),
         h('div', { class: 'callout' }, icon('lock'), h('div', null, 'Passwords and keys are encrypted (AES-256-GCM) and stored only on this computer. The app reconnects with them automatically, so you never log in again after an idle disconnect.')),
         result,
         h('button', { type: 'submit', hidden: true })
@@ -933,7 +936,10 @@
       return;
     }
     const parts = p.split('/').filter(Boolean);
-    const items = [h('button', { onclick: (e) => { e.stopPropagation(); navigate('/'); }, title: '/' }, icon('home'))];
+    const items = [
+      h('button', { onclick: (e) => { e.stopPropagation(); navigate('~'); }, title: 'Home folder (~)' }, icon('home')),
+      h('button', { onclick: (e) => { e.stopPropagation(); navigate('/'); }, title: 'Filesystem root (/)', class: 'mono' }, '/'),
+    ];
     let acc = '';
     for (const part of parts) {
       acc += '/' + part;
@@ -1630,7 +1636,7 @@
   function openRepoForm(existing) {
     if (!S.connections.length) { toast('warn', 'Add an FTP connection first'); openConnectionForm(); return; }
     const isEdit = !!existing;
-    const e = existing || { branch: 'main', pollSec: S.settings.defaultPollSec || 60, enabled: true, mappings: [{ local: '', remote: (S.connections[0].remoteRoot || '/'), deleteRemoved: true }], excludes: ['.github/', '.gitignore', '.gitattributes'] };
+    const e = existing || { branch: 'main', pollSec: S.settings.defaultPollSec || 60, enabled: true, mappings: [{ local: '', remote: ((conn(S.activeConn) || S.connections[0]).remoteRoot || '/'), deleteRemoved: true }], excludes: ['.github/', '.gitignore', '.gitattributes'] };
     const branchList = h('datalist', { id: `br_${uid()}` });
     const f = {
       source: h('input', { class: 'input mono', value: isEdit ? e.localPath || e.url : '', placeholder: 'D:\\Projects\\my-site   or   https://github.com/me/my-site.git', spellcheck: 'false' }),
@@ -1657,7 +1663,7 @@
       setKids(mapHost, 
         ...mappings.map((m, i) => {
           const local = h('input', { class: 'input mono', value: m.local, placeholder: 'dist  (empty = whole repo)', oninput: (ev) => (m.local = ev.target.value) });
-          const remote = h('input', { class: 'input mono', value: m.remote, placeholder: '/public_html', oninput: (ev) => (m.remote = ev.target.value) });
+          const remote = h('input', { class: 'input mono', value: m.remote, placeholder: '~/public_html  or  /absolute/path', oninput: (ev) => (m.remote = ev.target.value) });
           const del = h('label', { class: 'switch', title: 'Delete files on FTP when they are deleted in git' }, h('input', { type: 'checkbox', checked: m.deleteRemoved !== false, onchange: (ev) => (m.deleteRemoved = ev.target.checked) }), h('span'));
           return h('div', { class: 'map-row' },
             local,
@@ -1669,7 +1675,7 @@
             del,
             ibtn('trash', 'Remove mapping', () => { mappings.splice(i, 1); renderMaps(); }, '', { disabled: mappings.length === 1 }));
         }),
-        h('div', { class: 'row' }, btn('Add mapping', 'plus', () => { mappings.push({ local: '', remote: '/', deleteRemoved: true }); renderMaps(); }, 'sm'), h('span', { class: 'hint' }, 'Toggle = also delete on FTP when deleted in git.'))
+        h('div', { class: 'row' }, btn('Add mapping', 'plus', () => { mappings.push({ local: '', remote: '~', deleteRemoved: true }); renderMaps(); }, 'sm'), h('span', { class: 'hint' }, '~ = home folder on the server (e.g. ~/erp-api). Toggle = also delete on the server when deleted in git.'))
       );
     };
     renderMaps();

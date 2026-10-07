@@ -90,7 +90,7 @@ async function startFtp() {
   const ftpSrv = await startFtp();
   // A connection saved by the pre-SSH version (no protocol field) on port 22.
   fs.mkdirSync(process.env.FTPGIT_DATA, { recursive: true });
-  fs.writeFileSync(path.join(process.env.FTPGIT_DATA, 'db.json'), JSON.stringify({ connections: [{ id: 'con_legacy', name: 'Legacy', host: '127.0.0.1', port: 22, user: 'x', secure: 'none', remoteRoot: '/' }] }));
+  fs.writeFileSync(path.join(process.env.FTPGIT_DATA, 'db.json'), JSON.stringify({ connections: [{ id: 'con_legacy', name: 'Legacy', host: '127.0.0.1', port: 22, user: 'x', secure: 'none', remoteRoot: '/' }, { id: 'con_legacy_ssh', name: 'Old SSH', protocol: 'sftp', host: '127.0.0.1', port: 2200, user: 'x', secure: 'none', remoteRoot: '/' }] }));
   const { start } = require('../server/index');
   const server = await start(Number(process.env.PORT), '127.0.0.1');
   const { db } = require('../server/store');
@@ -495,6 +495,65 @@ async function startFtp() {
     assert(repo.lastDeployedSha === git(['rev-parse', 'HEAD'], WORK) && repo.status === 'warning', `${repo.status}`);
     await api('DELETE', `/api/repos/${srid}`);
   });
+
+  // ================================================================ SSH home folder (shared hosting layout)
+  console.log('SSH home folder (shared-hosting layout: unreadable "/")');
+  const HOME_PORT = SFTP_PORT + 1;
+  const HOME_ROOT = path.join(TMP, 'sftp-home-root');
+  const homeSrv = await startSftpServer({ port: HOME_PORT, root: HOME_ROOT, user: 'ovh', password: 'ovh-pass', home: '/homez.42/ovh', lockRoot: true });
+  let hid;
+  await step('new SSH connection starts in the home folder, not "/"', async () => {
+    const c = await api('POST', '/api/connections', { protocol: 'ssh', host: '127.0.0.1', port: HOME_PORT, user: 'ovh', password: 'ovh-pass' });
+    hid = c.id;
+    assert(c.remoteRoot === '~', `remoteRoot ${c.remoteRoot}`);
+    fs.mkdirSync(path.join(HOME_ROOT, 'homez.42', 'ovh', 'erp-api'), { recursive: true });
+    const l = await api('GET', `/api/ftp/${hid}/list`);
+    assert(l.path === '/homez.42/ovh' && l.entries.some((e) => e.name === 'erp-api' && e.path === '/homez.42/ovh/erp-api'), JSON.stringify(l));
+  });
+  await step('"~/x" paths resolve to the home folder; "/" is refused like on OVH', async () => {
+    const l = await api('GET', `/api/ftp/${hid}/list?path=${encodeURIComponent('~/erp-api')}`);
+    assert(l.path === '/homez.42/ovh/erp-api', l.path);
+    const r = await fetch(`${APP}/api/ftp/${hid}/list?path=/`);
+    assert(r.status === 403, `root -> ${r.status}`);
+  });
+  await step('upload into "~/erp-api" lands in the home folder', async () => {
+    const fd = new FormData();
+    fd.append('relpath', 'index.php');
+    fd.append('files', new Blob(['<?php echo 1;']), 'index.php');
+    const up = await fetch(`${APP}/api/ftp/${hid}/upload?path=${encodeURIComponent('~/erp-api')}&tid=h1`, { method: 'POST', body: fd }).then((x) => x.json());
+    assert(up.results[0].ok && up.results[0].path === '/homez.42/ovh/erp-api/index.php', JSON.stringify(up));
+    assert(fs.existsSync(path.join(HOME_ROOT, 'homez.42', 'ovh', 'erp-api', 'index.php')), 'on disk');
+  });
+  await step('git deploy to "~/erp-frontend" + post-deploy command in that folder', async () => {
+    const info = await api('POST', '/api/git/inspect', { source: WORK });
+    const r = await api('POST', '/api/repos', {
+      name: 'erp-frontend', url: info.url, branch: 'main', connectionId: hid,
+      mappings: [{ local: 'dist', remote: '~/erp-frontend' }], pollSec: 3600, initialDeploy: true,
+      postDeployCommand: 'echo built> built.txt',
+    });
+    assert(r.mappings[0].remote === '~/erp-frontend', r.mappings[0].remote);
+    const dep = await waitFor(() => db.deployments.find((d) => d.repoId === r.id && d.status !== 'running'), 30000, 200, 'home deploy');
+    assert(dep.status === 'success', dep.log.map((l) => l.message).join('\n'));
+    const target = path.join(HOME_ROOT, 'homez.42', 'ovh', 'erp-frontend');
+    assert(fs.existsSync(path.join(target, 'index.html')), 'deployed into home');
+    assert(fs.readFileSync(path.join(target, 'built.txt'), 'utf8').trim() === 'built', 'command ran in ~/erp-frontend');
+    await api('DELETE', `/api/repos/${r.id}`);
+  });
+  await step('relative and "~" paths are normalized consistently', async () => {
+    const { resolveRemotePath, normalizeConfiguredPath } = require('../server/remote');
+    const cases = [
+      [resolveRemotePath('/h/u', '~'), '/h/u'], [resolveRemotePath('/h/u', ''), '/h/u'], [resolveRemotePath('/h/u', '~/a/'), '/h/u/a'],
+      [resolveRemotePath('/h/u', 'a/b'), '/h/u/a/b'], [resolveRemotePath('/h/u', '/x/../y'), '/y'], [resolveRemotePath('/', '~/a'), '/a'],
+      [normalizeConfiguredPath('erp-api'), '~/erp-api'], [normalizeConfiguredPath('~/a//b/'), '~/a/b'], [normalizeConfiguredPath('~'), '~'],
+      [normalizeConfiguredPath(''), '/'], [normalizeConfiguredPath('', '~'), '~'], [normalizeConfiguredPath('/www/'), '/www'],
+    ];
+    for (const [got, want] of cases) assert(got === want, `got ${got}, want ${want}`);
+  });
+  await step('existing SSH connection saved with "/" is migrated to start at "~"', async () => {
+    const c = db.connections.find((x) => x.id === 'con_legacy_ssh');
+    assert(c && c.remoteRoot === '~' && c.homeStart, JSON.stringify(c));
+  });
+  homeSrv.close();
 
   await step('version endpoint reports whether a restart is needed', async () => {
     const v = await api('GET', '/api/version');

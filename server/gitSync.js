@@ -9,7 +9,7 @@ const { execFile } = require('child_process');
 const { db, save, id, trim, decrypt, DATA_DIR } = require('./store');
 const { broadcast, activity } = require('./events');
 const { withClient, getConnection } = require('./ftpManager');
-const { isNotFound, isSftp } = require('./remote');
+const { isNotFound, isSftp, resolveRemotePath, normalizeConfiguredPath } = require('./remote');
 
 const REPOS_DIR = path.join(DATA_DIR, 'repos');
 fs.mkdirSync(REPOS_DIR, { recursive: true });
@@ -120,11 +120,7 @@ function normLocal(p) {
 }
 
 function normRemote(p) {
-  let r = String(p || '/').replace(/\\/g, '/').trim();
-  if (!r) r = '/';
-  r = path.posix.normalize(r);
-  if (r.length > 1) r = r.replace(/\/+$/, '');
-  return r;
+  return normalizeConfiguredPath(p, '/'); // keeps "~/folder" (home-relative) notation
 }
 
 function globToRegex(glob) {
@@ -253,7 +249,8 @@ async function computeChanges(repo, dir, fromSha, toSha, dep) {
 
 /** Runs the repo's post-deploy shell command over SSH and streams its output into the deploy log. */
 async function runPostCommand(repo, dep, client, command) {
-  const cwd = repo.postDeployCwd || (repo.mappings && repo.mappings[0] && normRemote(repo.mappings[0].remote)) || null;
+  const wanted = repo.postDeployCwd || (repo.mappings && repo.mappings[0] && normRemote(repo.mappings[0].remote)) || '~';
+  const cwd = resolveRemotePath(client.home, wanted);
   logDep(dep, 'info', `$ ${command}${cwd ? `   (in ${cwd})` : ''}`);
   const pending = { stdout: '', stderr: '' };
   const flush = (kind, final) => {
@@ -333,6 +330,8 @@ async function deploy(repo, sha, { full = false, trigger = 'manual' } = {}) {
     if (command && !canExec) logDep(dep, 'warn', 'Post-deploy command skipped: the connection is FTP, which cannot run commands (use an SSH connection).');
     if (ops.length || (command && canExec)) {
       await withClient(repo.connectionId, async (client) => {
+        // "~/x" or "x" targets are inside the login (home) folder: make them absolute now.
+        for (const op of ops) op.remote = resolveRemotePath(client.home, op.remote);
         const madeDirs = new Set();
         let lastEmit = 0;
         for (const op of ops) {

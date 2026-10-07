@@ -91,7 +91,11 @@ function attach(server, { bindHost }) {
     stream.on('data', (d) => { lastActivity = Date.now(); send({ t: 'd', d: dec.write(d) }); });
     stream.stderr.on('data', (d) => send({ t: 'd', d: decErr.write(d) }));
     stream.on('close', (code) => { send({ t: 'exit', code: code ?? null }); cleanup(); });
-    if (cwd) stream.write(`cd ${shellQuote(cwd)} 2>/dev/null; clear\n`);
+    // No folder (or "~"): the shell already starts in the home folder.
+    if (cwd && cwd !== '~') {
+      const target = cwd.startsWith('~/') ? `~/${shellQuote(cwd.slice(2))}` : shellQuote(cwd);
+      stream.write(`cd ${target} 2>/dev/null; clear\n`);
+    }
 
     ws.on('message', (raw) => {
       let msg;

@@ -10,20 +10,20 @@ const { Server, utils } = require('ssh2');
 
 const { STATUS_CODE, flagsToString } = utils.sftp;
 
-function startSftpServer({ port = 2222, host = '127.0.0.1', root, user = 'demo', password = 'demo', publicKey = null, hostKey = null } = {}) {
+function startSftpServer({ port = 2222, host = '127.0.0.1', root, user = 'demo', password = 'demo', publicKey = null, hostKey = null, home = '/', lockRoot = false } = {}) {
   root = path.resolve(root);
-  fs.mkdirSync(root, { recursive: true });
+  fs.mkdirSync(path.join(root, ...home.split('/').filter(Boolean)), { recursive: true });
   const hostKeyPem = hostKey || utils.generateKeyPairSync('ed25519').private;
   const allowedKey = publicKey ? utils.parseKey(publicKey) : null;
 
   // Map an SFTP path ("/a/b" or relative to "/") to a real path inside root.
   const real = (p) => {
-    const v = path.posix.resolve('/', String(p || '.').replace(/\\/g, '/'));
+    const v = path.posix.resolve(home, String(p || '.').replace(/\\/g, '/'));
     const r = path.join(root, ...v.split('/').filter(Boolean));
     if (r !== root && !r.startsWith(root + path.sep)) throw new Error('outside root');
     return r;
   };
-  const virt = (p) => path.posix.resolve('/', String(p || '.').replace(/\\/g, '/'));
+  const virt = (p) => path.posix.resolve(home, String(p || '.').replace(/\\/g, '/'));
   const attrsOf = (st) => ({
     mode: st.mode,
     uid: 0,
@@ -58,7 +58,7 @@ function startSftpServer({ port = 2222, host = '127.0.0.1', root, user = 'demo',
         session.on('exec', (accept, _reject, info) => {
           const stream = accept();
           let cmd = info.command;
-          let cwd = root;
+          let cwd = real(home);
           // The app sends: cd '<dir>' && <command>. Emulate the cd part portably.
           const m = /^cd '((?:[^']|'\\'')*)' && ([\s\S]*)$/.exec(cmd);
           if (m) {
@@ -79,7 +79,7 @@ function startSftpServer({ port = 2222, host = '127.0.0.1', root, user = 'demo',
 
         session.on('shell', (accept) => {
           const stream = accept();
-          let vcwd = '/';
+          let vcwd = home;
           let line = '';
           const prompt = () => stream.write(`demo@dev-sftp:${vcwd}$ `);
           stream.write('Welcome to the FTPGit dev SSH server (minimal shell).\r\n');
@@ -172,6 +172,7 @@ function startSftpServer({ port = 2222, host = '127.0.0.1', root, user = 'demo',
           sftp.on('STAT', statHandler(fs.stat));
           sftp.on('LSTAT', statHandler(fs.lstat));
           sftp.on('OPENDIR', (reqid, p) => guard(reqid, () => {
+            if (lockRoot && virt(p) === '/') return sftp.status(reqid, STATUS_CODE.PERMISSION_DENIED); // like shared hosting
             const dir = real(p);
             fs.readdir(dir, (err, names) => {
               if (err) return sftp.status(reqid, statusOf(err));

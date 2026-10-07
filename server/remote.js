@@ -71,6 +71,8 @@ class FtpRemote {
       secure,
       secureOptions: secure ? { rejectUnauthorized: !conn.allowSelfSigned } : undefined,
     });
+    // Login folder ("~"). Read now, before any cd changes the working directory.
+    try { this.home = (await this.client.pwd()) || '/'; } catch { this.home = '/'; }
   }
 
   close() {
@@ -262,8 +264,12 @@ class SftpRemote {
           if (err) return fail(new Error(`SSH login worked but the SFTP subsystem is not available: ${err.message}`));
           this.sftp = s;
           s.on('close', () => { this.isClosed = true; });
-          settled = true;
-          resolve();
+          // Remember the login (home) folder: "~" and relative paths resolve against it.
+          s.realpath('.', (e2, home) => {
+            this.home = e2 ? '/' : home || '/';
+            settled = true;
+            resolve();
+          });
         });
       });
       ssh.on('error', (e) => {
@@ -481,6 +487,35 @@ function readBanner(host, port, timeoutMs = 4000) {
   });
 }
 
+/**
+ * Turns a user path into an absolute remote path.
+ * "~", "" and "~/x" are relative to the login (home) folder, as are paths without a leading "/".
+ * SFTP needs this: "/" there is the real filesystem root (often unreadable on shared hosting),
+ * while FTP servers usually jail you so "/" already is your home.
+ */
+function resolveRemotePath(home, p) {
+  const base = home || '/';
+  let r = String(p ?? '').replace(/\\/g, '/').trim();
+  if (!r || r === '~') r = base;
+  else if (r.startsWith('~/')) r = path.posix.join(base, r.slice(2));
+  else if (!r.startsWith('/')) r = path.posix.join(base, r);
+  r = path.posix.normalize(r);
+  return r.length > 1 ? r.replace(/\/+$/, '') : r;
+}
+
+/** Normalizes a configured folder (start folder, mapping target) while keeping "~" notation. */
+function normalizeConfiguredPath(p, fallback = '/') {
+  let r = String(p ?? '').replace(/\\/g, '/').trim();
+  if (!r) return fallback;
+  if (r === '~' || r.startsWith('~/')) {
+    const rest = path.posix.normalize(r.slice(1) || '/').replace(/\/+$/, '');
+    return rest && rest !== '/' ? `~${rest.startsWith('/') ? rest : '/' + rest}` : '~';
+  }
+  if (!r.startsWith('/')) return normalizeConfiguredPath(`~/${r}`);
+  r = path.posix.normalize(r);
+  return r.length > 1 ? r.replace(/\/+$/, '') : r;
+}
+
 function shellQuote(s) {
   return `'${String(s).replace(/'/g, `'\\''`)}'`;
 }
@@ -489,4 +524,4 @@ function createRemote(conn, timeout) {
   return isSftp(conn) ? new SftpRemote(conn, timeout) : new FtpRemote(conn, timeout);
 }
 
-module.exports = { createRemote, FtpRemote, SftpRemote, isNotFound, isSftp, defaultPort, shellQuote, fingerprint, readBanner };
+module.exports = { createRemote, FtpRemote, SftpRemote, isNotFound, isSftp, defaultPort, shellQuote, fingerprint, readBanner, resolveRemotePath, normalizeConfiguredPath };

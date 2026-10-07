@@ -57,7 +57,7 @@ To start without opening a browser, run `npm run serve`. To use another port, se
 2. Browse and manage files in **File Explorer**. Drag files from your desktop into the window to upload them. For SFTP, click **Terminal** in the header to open a shell.
 3. Open **Git Deploy** and click **Add repository**:
    - Enter your project folder, for example `D:\Projects\my-site`. You can also enter a remote URL. Click **Inspect**.
-   - Select the connection and add mappings. Each mapping goes from a repository folder to a server folder; click the folder icon to browse the server.
+   - Select the connection and add mappings. Each mapping goes from a repository folder to a server folder; click the folder icon to browse the server. `~` means your home folder on the server, so a mapping can look like `dist → ~/erp-frontend`.
    - Optionally, set an **After deploy (SSH)** command.
    - Keep **Install git pre-push hook** checked for instant deploys.
 4. Run `git push origin main`. The changed files appear on the server, and the deploy shows in *Deployment history*.
