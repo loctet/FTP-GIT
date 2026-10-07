@@ -11,7 +11,7 @@ Browse and edit your server files, open an SSH terminal, and ship your site when
 ![Platforms](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-38bdf8.svg)
 ![Protocols](https://img.shields.io/badge/protocols-FTP%20%7C%20FTPS%20%7C%20SSH%2FSFTP-22c55e.svg)
 
-![Git Deploy dashboard](docs/screenshots/git-deploy.png)
+![Deployments dashboard](docs/screenshots/git-deploy.png)
 
 </div>
 
@@ -45,11 +45,13 @@ FTPGit Studio links your Git repository to your server instead:
 ## Features
 
 ### 📁 File explorer for FTP, FTPS and SSH (SFTP)
-- **Navigation:** breadcrumbs, back and forward, sortable columns, a quick filter, and file-type icons.
+- **Navigation:** breadcrumbs, back and forward, sortable columns (right-click the header to show or hide columns), a quick filter, and file-type icons.
 - **Uploads:** drag and drop files or **whole folders**, including onto a sub-folder row. A transfers panel shows live progress.
+- **Local pane:** show a folder of your computer next to the server, then upload or download by button or by dragging rows between the two panes.
 - **File operations:** download, rename or move (also by dragging rows onto a folder), delete (recursive), new folder, new file, `chmod`, and copy path.
 - **Editor:** a built-in text editor (`Ctrl+S` to save) for HTML, CSS, JS, PHP, `.htaccess` and more.
 - **Keyboard shortcuts:** `Del`, `F2`, `Enter`, `Backspace`, `Ctrl+A`, `F5`, `Alt+←/→` and the arrow keys.
+- **Command palette:** `Ctrl+K` opens any server, deploys any repository, or jumps to a path such as `~/www`.
 - **Themes:** dark and light.
 
 ### 🖥️ SSH that just works
@@ -65,13 +67,19 @@ FTPGit Studio links your Git repository to your server instead:
 - **Instant or automatic:** a pre-push hook triggers the deploy within seconds of `git push`. Polling also catches pushes from CI or other machines.
 - **Local-folder mappings** upload build output that is not in Git. Automatic deploys send only what changed.
 - **Post-deploy SSH command**, for example `composer install --no-dev` or `php artisan migrate --force`. Its output appears in the deploy log.
+- **Pipeline view:** each deploy shows its steps (Fetch, Plan, Upload, Post-deploy) with their status and duration. The log is grouped by step, with filters, search and a `.log` download.
 - **Private repositories:** HTTPS with a token, SSH remotes, or your existing Git credential manager.
 
-### 🎯 Manual sync, under your control
-- **Sync buttons:** sync one mapping, **one or several sub-folders**, or everything.
-- **Preview** (a dry run) lists every file and the total size before anything moves.
+### 🎯 Manual uploads, under your control
+- **Upload buttons:** upload one mapping, **one or several sub-folders**, or everything.
+- **Preview first:** the dialog always lists every file and the total size, and the button then says exactly what happens, for example *Upload 4 files · 239 KB*.
 - **Mirror mode** replaces a server folder with the source. You confirm the list first. Excluded files and other mappings are never touched.
 - **Deployment history** keeps a full, live-streamed log of every run.
+
+### 🛡️ Safety on production
+- **Environment tags:** mark a connection as *Production*, *Staging* or *Development*. The tag shows in the sidebar, and its color runs along the top of the window while you browse that server.
+- **Typed confirmation:** deleting files on a production server, or a mirror upload that deletes files, asks you to type the server or repository name first.
+- **Activity center:** the bell icon lists running and recent deploys and transfers, and recent errors.
 
 ### 🔒 Sessions that respect your time
 - **Encrypted credentials:** they are stored with AES-256-GCM, on your machine only.
@@ -83,8 +91,8 @@ FTPGit Studio links your Git repository to your server instead:
 | File explorer | SSH terminal |
 |---|---|
 | ![File explorer](docs/screenshots/explorer.png) | ![SSH terminal](docs/screenshots/terminal.png) |
-| **Sync a folder (with preview)** | **Deployment log** |
-| ![Sync dialog](docs/screenshots/sync-dialog.png) | ![Deployment log](docs/screenshots/deploy-log.png) |
+| **Upload folders (with preview)** | **Deployment log** |
+| ![Upload folders dialog](docs/screenshots/sync-dialog.png) | ![Deployment log](docs/screenshots/deploy-log.png) |
 | **New SSH connection** | **Light theme** |
 | ![New connection](docs/screenshots/new-connection.png) | ![Light theme](docs/screenshots/explorer-light.png) |
 
@@ -134,9 +142,10 @@ Click **+** next to *Connections* and choose the connection type:
 | **FTP** | a plain FTP account | 21 |
 | **FTPS** | FTP over TLS (explicit or implicit) | 21 / 990 |
 
-- **Shortcut:** paste `user@host:port` into *Host*, and the fields fill themselves.
+- **Shortcut:** paste `user@host:port`, or a full URL such as `sftp://user@host:22/~/www`, into *Host*, and the fields fill themselves.
 - **Check first:** click **Test connection**, then **Save**.
 - **Start folder:** for SSH, `~` (your home folder) is the default start folder.
+- **Environment:** tag the server as *Production* to get the red header and typed confirmations.
 
 ### 2. Manage files
 
@@ -145,10 +154,12 @@ Open a connection to browse it:
 - **Edit:** double-click a text file.
 - **More actions:** right-click anything.
 - **Terminal (SSH only):** use the **Terminal** button.
+- **Local pane:** click the split icon at the left of the toolbar to show a folder of your computer next to the server.
+- **Connect / disconnect / edit:** use the **⋯** menu at the top right.
 
 ### 3. Connect a Git repository
 
-Open **Git Deploy**, then **Add repository**:
+Open **Deployments**, then **Add repository**:
 
 1. **Repository:** enter your project folder (for example `D:\projects\my-site`) or a remote URL, then click **Inspect**. A local folder enables the instant push hook.
 2. **Branch:** choose the branch to deploy (default `main`) and the target connection.
@@ -162,16 +173,17 @@ Open **Git Deploy**, then **Add repository**:
 
 From now on, `git push origin main` deploys automatically.
 
-### 4. Sync manually
+### 4. Upload manually
 
-Each mapping on the repository card has a **Sync** button, and **Sync files…** covers every mapping:
+Each mapping on the repository card has an **Upload** button, and **Upload folders…** covers every mapping:
 
-1. **What to sync:** pick all mappings, one mapping, or one or several **sub-folders**. Tick them in the browser or type them.
-2. **Preview:** check exactly what will be uploaded, and deleted in mirror mode.
-3. **Sync now:** start the upload. The deployment log opens and streams progress.
+1. **What to upload:** pick all mappings, one mapping, or one or several **sub-folders**. Tick them in the browser or type them.
+2. **Mode:** *Update* uploads and overwrites; *Mirror* also deletes server files that are not in the source.
+3. **Preview changes:** check exactly what will be uploaded, and deleted in mirror mode.
+4. **Upload:** the button now states the result, for example *Upload 4 files · 239 KB, delete 2*. The deployment log opens and streams progress.
 
 The other buttons on the card:
-- **Sync changes:** uploads only what changed since the last deployed commit.
+- **Deploy:** checks for new commits and uploads only what changed since the last deployed commit.
 - **⋯ → Redeploy all files:** uploads everything again.
 
 ## How deploys work
@@ -189,7 +201,7 @@ flowchart LR
 ```
 
 - **Exact files:** the app deploys from its own private clone, so uncommitted work is never uploaded and files are transferred byte for byte.
-- **Failed deploys:** the deployed commit does not advance, the full log is kept, and the next push (or *Sync changes*) retries.
+- **Failed deploys:** the deployed commit does not advance, the full log is kept, and the next push (or **Deploy**) retries.
 - **Rewritten history:** if a force-push rewrote the history, a full deploy runs instead.
 
 More details on each behaviour are in [docs/DESIGN.md](docs/DESIGN.md).
@@ -275,11 +287,11 @@ The server presented a different SSH key than the one saved on the first connect
 
 ```text
 server/
-  index.js        HTTP API, static UI, startup migrations
+  index.js        HTTP API (incl. local-pane file access), static UI, startup migrations
   remote.js       protocol adapters: FTP/FTPS (basic-ftp) and SSH/SFTP (ssh2)
   ftpManager.js   sessions: queue, idle disconnect, keep-alive, auto-reconnect, host keys
   terminal.js     WebSocket ⇄ SSH shell bridge for the web terminal
-  gitSync.js      polling, diff, mappings, local folders, scoped sync, mirror, deploys, push hook
+  gitSync.js      polling, diff, mappings, local folders, scoped sync, mirror, deploy steps, push hook
   store.js        JSON store and AES-256-GCM secrets
   events.js       Server-Sent Events and activity log
 public/           UI (vanilla JavaScript, no build step)
@@ -303,6 +315,7 @@ The end-to-end suite starts real FTP and SSH servers and a bare Git remote, then
 - push-hook and polling deploys;
 - local-folder mappings;
 - scoped and mirror syncs;
+- deploy steps, environment tags and local-pane transfers;
 - security checks.
 
 ## Contributing

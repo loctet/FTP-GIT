@@ -1,7 +1,9 @@
 'use strict';
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
-const { Readable, Writable } = require('stream');
+const { Readable, Writable, Transform } = require('stream');
+const { finished } = require('stream/promises');
 const express = require('express');
 const multer = require('multer');
 
@@ -33,6 +35,13 @@ app.use('/api', (req, res, next) => {
   if (!['127.0.0.1', 'localhost', '::1'].includes(host) && HOST === '127.0.0.1') {
     return res.status(403).json({ error: 'Forbidden host' });
   }
+  // Browsers send Origin on cross-site requests: refuse those, so other web pages cannot drive the API.
+  const origin = req.headers.origin;
+  if (origin && origin !== 'null') {
+    let originHost = '';
+    try { originHost = new URL(origin).host; } catch {}
+    if (originHost !== req.headers.host) return res.status(403).json({ error: 'Forbidden origin' });
+  }
   next();
 });
 
@@ -54,6 +63,8 @@ function publicConnection(c) {
   return { ...rest, protocol: c.protocol || 'ftp', hasPassword: !!passwordEnc, hasPrivateKey: !!privateKeyEnc, hasPassphrase: !!passphraseEnc };
 }
 
+const ENVS = ['production', 'staging', 'development'];
+
 function connectionFromBody(body, existing = {}) {
   // "ssh" is accepted as an alias: SSH connections use SFTP for files and SSH for the terminal.
   const asked = body.protocol === 'ssh' ? 'sftp' : body.protocol;
@@ -72,6 +83,8 @@ function connectionFromBody(body, existing = {}) {
     allowSelfSigned: protocol === 'ftp' && !!(body.allowSelfSigned ?? existing.allowSelfSigned),
     remoteRoot: normalizeConfiguredPath(body.remoteRoot ?? existing.remoteRoot, protocol === 'sftp' ? '~' : '/'),
     color: body.color ?? existing.color ?? null,
+    // Environment tag: drives the colored warnings in the UI (production = extra confirmation).
+    env: ENVS.includes(body.env) ? body.env : body.env !== undefined ? null : existing.env ?? null,
   };
   if (protocol === 'sftp' && !out.user) throw httpError(400, 'Username is required for SSH');
   if (protocol === 'sftp') out.homeStart = true; // start folder chosen with "~" support: never migrate it
@@ -419,6 +432,188 @@ app.post('/api/ftp/:id/upload', upload.array('files'), wrap(async (req, res) => 
   } finally {
     cleanup();
   }
+}));
+
+// ------------------------------------------------------------ local files (dual-pane explorer)
+// The app runs on the user's own computer, so the "local" pane is this machine's filesystem.
+
+function localRoots() {
+  if (process.platform !== 'win32') return ['/'];
+  const roots = [];
+  for (let c = 65; c <= 90; c++) {
+    const d = `${String.fromCharCode(c)}:\\`;
+    try { if (fs.existsSync(d)) roots.push(d); } catch {}
+  }
+  return roots;
+}
+
+function localPath(p) {
+  const raw = String(p || '').trim();
+  if (!raw || raw === '~') return os.homedir();
+  const expanded = raw.startsWith('~/') || raw.startsWith('~\\') ? path.join(os.homedir(), raw.slice(2)) : raw;
+  if (!path.isAbsolute(expanded)) throw httpError(400, `Use an absolute folder path: ${raw}`);
+  return path.resolve(expanded);
+}
+
+// Only a plain file or folder name: never a path that could climb out of the destination folder.
+const safeName = (n) => String(n || '').replace(/[\\/]/g, '_').replace(/^\.\.?$/, '_');
+
+app.get('/api/local/list', (req, res) => {
+  const dir = localPath(req.query.path);
+  let names;
+  try { names = fs.readdirSync(dir, { withFileTypes: true }); } catch (e) {
+    throw httpError(e.code === 'ENOENT' ? 404 : e.code === 'EACCES' || e.code === 'EPERM' ? 403 : 400, `Cannot open ${dir}: ${e.code || e.message}`);
+  }
+  const entries = [];
+  for (const d of names) {
+    const full = path.join(dir, d.name);
+    let st = null;
+    try { st = fs.statSync(full); } catch {}
+    const type = st ? (st.isDirectory() ? 'dir' : 'file') : d.isDirectory() ? 'dir' : 'file';
+    entries.push({ name: d.name, type, path: full, size: st && type === 'file' ? st.size : 0, modifiedAt: st ? st.mtime.toISOString() : null });
+  }
+  entries.sort((a, b) => (a.type === 'dir') === (b.type === 'dir') ? a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' }) : a.type === 'dir' ? -1 : 1);
+  const parent = path.dirname(dir);
+  res.json({ path: dir, parent: parent === dir ? null : parent, sep: path.sep, home: os.homedir(), roots: localRoots(), entries });
+});
+
+/** Every file under the given local paths: [{ abs, rel, size }] with "/" separators in rel. */
+function walkLocal(paths) {
+  const out = [];
+  const walk = (abs, rel) => {
+    const st = fs.statSync(abs);
+    if (st.isDirectory()) {
+      out.push({ abs, rel, size: 0, dir: true });
+      for (const n of fs.readdirSync(abs)) walk(path.join(abs, n), `${rel}/${n}`);
+    } else if (st.isFile()) out.push({ abs, rel, size: st.size });
+  };
+  for (const p of paths) walk(localPath(p), path.basename(localPath(p)));
+  return out;
+}
+
+// Upload files or folders from this computer to the server, without going through the browser.
+app.post('/api/ftp/:id/upload-local', wrap(async (req, res) => {
+  const conn = ftpm.getConnection(req.params.id);
+  const b = req.body || {};
+  const paths = Array.isArray(b.paths) ? b.paths : [];
+  if (!paths.length) throw httpError(400, 'Choose files or folders to upload');
+  const items = walkLocal(paths);
+  const files = items.filter((x) => !x.dir);
+  const total = files.reduce((n, f) => n + f.size, 0);
+  const tid = String(b.tid || id('tr'));
+  const s = ftpm.session(req.params.id);
+  const results = [];
+  let dir = b.dest || conn.remoteRoot || '/';
+  let doneBytes = 0;
+  s.touch();
+  await ftpm.withClient(req.params.id, async (client) => {
+    dir = resolveRemotePath(client.home, dir);
+    const madeDirs = new Set();
+    for (const d of items.filter((x) => x.dir)) {
+      const target = path.posix.join(dir, d.rel);
+      if (!madeDirs.has(target)) { await client.ensureDir(target); madeDirs.add(target); }
+    }
+    for (let i = 0; i < files.length; i++) {
+      const f = files[i];
+      const target = path.posix.join(dir, f.rel);
+      try {
+        const parent = path.posix.dirname(target);
+        if (!madeDirs.has(parent)) { await client.ensureDir(parent); madeDirs.add(parent); }
+        let last = 0;
+        await client.uploadFrom(f.abs, target, (bytes) => {
+          const now = Date.now();
+          if (now - last < 150) return;
+          last = now;
+          events.broadcast('transfer', { tid, phase: 'ftp', name: f.rel, index: i, count: files.length, bytes: doneBytes + bytes, total });
+        });
+        doneBytes += f.size;
+        s.touch();
+        results.push({ path: target, ok: true, size: f.size });
+      } catch (e) {
+        results.push({ path: target, ok: false, error: e.message });
+        if (client.closed) {
+          for (let j = i + 1; j < files.length; j++) results.push({ path: path.posix.join(dir, files[j].rel), ok: false, error: 'Connection lost' });
+          break;
+        }
+      }
+      events.broadcast('transfer', { tid, phase: 'ftp', name: f.rel, index: i + 1, count: files.length, bytes: doneBytes, total });
+    }
+  });
+  const ok = results.filter((r) => r.ok).length;
+  events.activity(ok === results.length ? 'success' : 'warn', 'ftp', `Uploaded ${ok}/${results.length} local file(s) to ${dir}`, { connectionId: req.params.id });
+  events.broadcast('transfer', { tid, phase: 'done', count: files.length, ok, total });
+  res.json({ results, total });
+}));
+
+// Download server files or folders into a folder on this computer.
+app.post('/api/ftp/:id/download-local', wrap(async (req, res) => {
+  const b = req.body || {};
+  const items = Array.isArray(b.items) ? b.items : [];
+  if (!items.length) throw httpError(400, 'Choose files or folders to download');
+  const dest = localPath(b.dest);
+  if (!fs.existsSync(dest) || !fs.statSync(dest).isDirectory()) throw httpError(400, `Not a folder on this computer: ${dest}`);
+  const tid = String(b.tid || id('tr'));
+  const s = ftpm.session(req.params.id);
+  const results = [];
+  let total = 0;
+  let doneBytes = 0;
+  s.touch();
+  await ftpm.withClient(req.params.id, async (client) => {
+    // Expand folders first, so progress has a real total.
+    const files = [];
+    const dirs = [];
+    const walk = async (remote, rel, type, size) => {
+      if (type === 'dir') {
+        dirs.push(rel);
+        for (const e of await client.list(remote)) await walk(path.posix.join(remote, e.name), `${rel}/${safeName(e.name)}`, e.type, e.size);
+      } else if (type === 'file') files.push({ remote, rel, size: size || 0 });
+    };
+    for (const it of items) {
+      const remote = remotePath(it.path);
+      await walk(remote, safeName(path.posix.basename(remote)), it.type === 'dir' ? 'dir' : 'file', it.size);
+    }
+    total = files.reduce((n, f) => n + f.size, 0);
+    for (const d of dirs) fs.mkdirSync(path.join(dest, ...d.split('/')), { recursive: true });
+    for (let i = 0; i < files.length; i++) {
+      const f = files[i];
+      const target = path.join(dest, ...f.rel.split('/'));
+      let out = null;
+      try {
+        let bytes = 0;
+        let last = 0;
+        out = fs.createWriteStream(target);
+        const counter = new Transform({
+          transform(chunk, _enc, cb) {
+            bytes += chunk.length;
+            const now = Date.now();
+            if (now - last >= 150) {
+              last = now;
+              events.broadcast('transfer', { tid, phase: 'ftp', name: f.rel, index: i, count: files.length, bytes: doneBytes + bytes, total });
+            }
+            cb(null, chunk);
+          },
+        });
+        counter.pipe(out);
+        await client.downloadTo(counter, f.remote);
+        await finished(out);
+        doneBytes += bytes;
+        s.touch();
+        results.push({ path: target, ok: true, size: bytes });
+      } catch (e) {
+        if (out) { // no half-written files
+          if (!out.closed) await new Promise((resolve) => { out.once('close', resolve); out.destroy(); });
+          fs.rmSync(target, { force: true });
+        }
+        results.push({ path: target, ok: false, error: e.message });
+        if (client.closed) break;
+      }
+      events.broadcast('transfer', { tid, phase: 'ftp', name: f.rel, index: i + 1, count: files.length, bytes: doneBytes, total });
+    }
+  });
+  const ok = results.filter((r) => r.ok).length;
+  events.activity(ok === results.length ? 'success' : 'warn', 'ftp', `Downloaded ${ok}/${results.length} file(s) to ${dest}`, { connectionId: req.params.id });
+  events.broadcast('transfer', { tid, phase: 'done', count: results.length, ok, total });
+  res.json({ results, total });
 }));
 
 // ------------------------------------------------------------ git repos

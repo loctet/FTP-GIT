@@ -218,6 +218,7 @@ async function ensureClone(repo, dep) {
 
 function logDep(dep, level, message) {
   const entry = { ts: new Date().toISOString(), level, message };
+  if (dep.phase) entry.phase = dep.phase;
   dep.log.push(entry);
   if (dep.log.length > 5000) dep.log.splice(0, dep.log.length - 5000);
   broadcast('deploy-log', { deploymentId: dep.id, repoId: dep.repoId, entry });
@@ -582,6 +583,52 @@ async function runPostCommand(repo, dep, client, command) {
   }
 }
 
+// ---------------------------------------------------------------- deploy steps
+// Each deployment moves through fixed steps; the UI draws them as a pipeline and groups log lines by step.
+const STEPS = [
+  { key: 'fetch', label: 'Fetch' },
+  { key: 'plan', label: 'Plan' },
+  { key: 'upload', label: 'Upload' },
+  { key: 'command', label: 'Post-deploy' },
+];
+
+function newSteps() {
+  return STEPS.map((s) => ({ ...s, status: 'pending', startedAt: null, finishedAt: null }));
+}
+
+function stepStart(dep, key) {
+  const now = new Date().toISOString();
+  for (const s of dep.steps) {
+    if (s.status === 'running') { s.status = 'done'; s.finishedAt = now; }
+    if (s.key === key) { s.status = 'running'; s.startedAt = now; }
+  }
+  dep.phase = key;
+}
+
+function stepEnd(dep, key, status) {
+  const s = dep.steps.find((x) => x.key === key);
+  if (s && s.status === 'running') { s.status = status; s.finishedAt = new Date().toISOString(); }
+}
+
+function stepSkip(dep, key) {
+  const s = dep.steps.find((x) => x.key === key);
+  if (s && s.status === 'pending') s.status = 'skipped';
+}
+
+/** Close the step list when the deployment ends: the running step takes the final result. */
+function stepsFinish(dep, ok) {
+  const now = new Date().toISOString();
+  for (const s of dep.steps) {
+    if (s.status === 'running') { s.status = ok ? 'done' : 'failed'; s.finishedAt = now; }
+    else if (s.status === 'pending') s.status = 'skipped';
+  }
+  if (!ok && !dep.steps.some((s) => s.status === 'failed')) {
+    const last = [...dep.steps].reverse().find((s) => s.status === 'done');
+    if (last) last.status = 'failed';
+  }
+  dep.phase = null;
+}
+
 async function deploy(repo, sha, { full = false, trigger = 'manual', scope = null, depId = null } = {}) {
   const dep = {
     id: depId || id('dep'),
@@ -603,6 +650,8 @@ async function deploy(repo, sha, { full = false, trigger = 'manual', scope = nul
     bytes: 0,
     commit: null,
     full: false,
+    steps: newSteps(),
+    phase: null,
     log: [],
   };
   db.deployments.push(dep);
@@ -617,6 +666,8 @@ async function deploy(repo, sha, { full = false, trigger = 'manual', scope = nul
     const usesGit = !scope || scope.needsGit;
     let dir = null;
     if (usesGit) {
+      stepStart(dep, 'fetch');
+      broadcast('deploy', publicDeployment(dep));
       dir = await ensureClone(repo, dep);
       if (!sha) sha = (await git(['rev-parse', `refs/remotes/origin/${repo.branch}`], { cwd: dir })).trim();
       dep.to = sha;
@@ -625,8 +676,10 @@ async function deploy(repo, sha, { full = false, trigger = 'manual', scope = nul
       const info = (await git(['log', '-1', '--format=%H%x00%an%x00%ad%x00%s', '--date=iso-strict', sha], { cwd: dir })).trim().split('\0');
       dep.commit = { sha: info[0], author: info[1], date: info[2], message: info[3] };
       logDep(dep, 'info', `Commit ${sha.slice(0, 7)} by ${info[1]}: ${info[3]}`);
-    }
+    } else stepSkip(dep, 'fetch');
 
+    stepStart(dep, 'plan');
+    broadcast('deploy', publicDeployment(dep));
     let ops;
     let manifests = {};
     if (scope) {
@@ -661,6 +714,7 @@ async function deploy(repo, sha, { full = false, trigger = 'manual', scope = nul
     const wantCommand = !!command && (!scope || scope.runCommand);
     if (command && scope && !scope.runCommand) logDep(dep, 'info', 'Post-deploy command not run for this sync (not requested).');
     if (wantCommand && !canExec) logDep(dep, 'warn', 'Post-deploy command skipped: the connection is FTP, which cannot run commands (use an SSH connection).');
+    if (!(wantCommand && canExec)) stepSkip(dep, 'command');
     const failedMappings = new Set();
     if (ops.length || (wantCommand && canExec) || (scope && scope.mirror)) {
       await withClient(repo.connectionId, async (client) => {
@@ -672,6 +726,9 @@ async function deploy(repo, sha, { full = false, trigger = 'manual', scope = nul
           ops.push(...extra);
           dep.total = ops.length;
         }
+        if (ops.length) stepStart(dep, 'upload');
+        else { stepEnd(dep, 'plan', 'done'); stepSkip(dep, 'upload'); }
+        broadcast('deploy', publicDeployment(dep));
         const madeDirs = new Set();
         let lastEmit = 0;
         for (const op of ops) {
@@ -715,8 +772,17 @@ async function deploy(repo, sha, { full = false, trigger = 'manual', scope = nul
             broadcast('deploy', publicDeployment(dep));
           }
         }
-        if (wantCommand && canExec && !dep.failed) await runPostCommand(repo, dep, client, command);
+        if (dep.failed) stepEnd(dep, 'upload', 'failed');
+        if (wantCommand && canExec && !dep.failed) {
+          stepStart(dep, 'command');
+          broadcast('deploy', publicDeployment(dep));
+          await runPostCommand(repo, dep, client, command);
+          if (dep.commandFailed) stepEnd(dep, 'command', 'failed');
+        }
       });
+    } else {
+      stepEnd(dep, 'plan', 'done');
+      stepSkip(dep, 'upload');
     }
 
     // Remember what was uploaded from local folders, so the next deploy only sends changes.
@@ -749,6 +815,7 @@ async function deploy(repo, sha, { full = false, trigger = 'manual', scope = nul
     repo.lastError = e.message;
     logDep(dep, 'error', e.message);
   }
+  stepsFinish(dep, dep.status !== 'failed');
   dep.finishedAt = new Date().toISOString();
   const secs = ((Date.parse(dep.finishedAt) - Date.parse(dep.startedAt)) / 1000).toFixed(1);
   const what = dep.scope && dep.trigger === 'manual-scoped' ? ` [${dep.scope}]` : '';

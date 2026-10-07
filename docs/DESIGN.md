@@ -38,7 +38,8 @@ This document explains how FTPGit Studio behaves, and why. Most of these choices
 | What is uploaded | **Only what changed**: `git diff` between the last deployed commit and the new one. Deleted files are removed on the server (this can be turned off per mapping). If history was rewritten, the app does a full deploy instead. |
 | First sync | **Safe by default**: the current commit becomes the *baseline* and only later pushes are uploaded. One checkbox enables a full first deploy instead. |
 | Source of git files | A private clone under `data/repos/`, so uncommitted local edits are never deployed. Files are deployed byte for byte (`core.autocrlf` is forced off). |
-| Failures | A failed deploy keeps its log, and the "deployed" commit does not advance. The same failed commit is not retried in a loop: the next push, or *Sync changes*, retries it. |
+| Failures | A failed deploy keeps its log, and the "deployed" commit does not advance. The same failed commit is not retried in a loop: the next push, or **Deploy**, retries it. |
+| Steps | Every deployment records four steps: **Fetch**, **Plan**, **Upload** and **Post-deploy**, each with a status (done, failed, skipped) and timestamps. Log lines carry the step they belong to, so the UI draws a pipeline and groups the log by step. A local-folder-only upload skips Fetch. |
 | Post-deploy command | Optional, SSH only. It runs after the files are uploaded, by default in the first mapping's folder. A non-zero exit marks the deploy *Cmd failed* but keeps the files, which are not uploaded again. |
 
 ## Mappings and manual sync
@@ -47,19 +48,31 @@ This document explains how FTPGit Studio behaves, and why. Most of these choices
 |---|---|
 | Mapping sources | **Git**: files of the pushed commit. **Local folder**: a folder on this computer, typically a build output such as `frontend/dist` that is not committed. A local folder is either absolute, or relative to the repository's local folder. Windows paths such as `D:\…` are detected automatically. |
 | Local folders in automatic deploys | Only files that changed since the last upload are sent, judged by size and content hash. Files that disappeared are removed. If the build folder is missing, the git part still deploys and the log shows a warning. |
-| Manual sync scope | Each mapping has a **Sync** button. The *Sync files…* dialog syncs all mappings, one mapping, or **one or several sub-folders** of a mapping, which you can tick in a folder browser or type in. A partial sync does not change the recorded deployed commit; syncing all mappings counts as a full deploy. |
-| Preview | Every manual sync can be previewed (a dry run) first, which shows each file and the bytes to transfer. |
-| Mirror mode | Optional. It deletes server files in the synced folders that are not in the source, after you confirm a list. It never deletes files that match the exclude patterns or folders that belong to another mapping, and it refuses to mirror `/` or the home folder. It is preselected for local folders, which usually means "replace the build on the server". |
+| Manual upload scope | Each mapping has an **Upload** button. The *Upload folders…* dialog uploads all mappings, one mapping, or **one or several sub-folders** of a mapping, which you can tick in a folder browser or type in. A partial upload does not change the recorded deployed commit; uploading all mappings counts as a full deploy. |
+| Preview | Every manual upload is previewed (a dry run) first, which shows each file and the bytes to transfer. The primary button then states the result (*Upload 4 files · 239 KB, delete 2*), so nothing starts without a reviewed list. |
+| Mirror mode | Optional, chosen with the *Update / Mirror* switch. It deletes server files in the uploaded folders that are not in the source, after you confirm the list and type the repository name (or the server name for a production server). It never deletes files that match the exclude patterns or folders that belong to another mapping, and it refuses to mirror `/` or the home folder. It is preselected for local folders, which usually means "replace the build on the server". |
+
+## Safety and interface
+
+| Decision | Choice and reason |
+|---|---|
+| Environment tags | A connection can be tagged *Production*, *Staging* or *Development*. The tag is shown next to the server everywhere, and its color runs along the top of the window while you browse it, so you always know where you are. |
+| Typed confirmation | Destructive actions on a production server (deleting files, deleting the connection) and mirror uploads that delete files ask you to type a name. Ordinary servers keep a one-click confirmation. |
+| One name per action | **Deploy** uploads what changed since the last deployed commit. **Upload folders…** uploads whole folders on demand. **Check for pushes** asks every repository for new commits. |
+| Local pane | The explorer can show a folder of this computer next to the server. Transfers between the panes go through the local server (`/api/local/list`, `upload-local`, `download-local`), not the browser, so folders of any size work. A download never leaves a half-written file behind. |
+| Command palette | `Ctrl+K` reaches every view, server, repository action and explorer action, and accepts a path (`~/www`) to jump to. |
+| Activity center | The bell icon lists running and recent deploys and transfers, plus errors from the last 24 hours. |
+| Idle countdown | The header shows only the connection state. The idle countdown sits in the status bar, where it informs without pressing. |
 
 ## Security
 
 | Decision | Choice and reason |
 |---|---|
-| Network exposure | The app listens on **127.0.0.1 only**. It rejects requests whose `Host` header is foreign (DNS-rebinding protection), and terminal WebSockets that come from another origin. There is no authentication, because it is a single-user local tool. Exposing it on a network (`HOST=0.0.0.0`) is not recommended. |
+| Network exposure | The app listens on **127.0.0.1 only**. It rejects requests whose `Host` header is foreign (DNS-rebinding protection), API requests and terminal WebSockets whose `Origin` is another site, so a web page you visit cannot drive the app. There is no authentication, because it is a single-user local tool. Exposing it on a network (`HOST=0.0.0.0`) is not recommended. |
 | Secrets | Passwords, private keys, passphrases and Git tokens are encrypted at rest and never sent back to the browser. A Git token is sent as an HTTP header, never written into a remote URL. |
 
 ## Known limitations
 
-- You cannot download a whole folder as a zip; you can download several files at once.
+- You cannot download a whole folder as a zip. Use the local pane to copy a folder to your computer instead.
 - The terminal follows the server's shell. Some very minimal shells may not support resizing.
 - There is one user per installation: the app is meant to run on your own machine.

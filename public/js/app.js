@@ -66,6 +66,14 @@
     music: '<path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/>',
     move: '<path d="M5 9l-3 3 3 3M9 5l3-3 3 3M15 19l-3 3-3-3M19 9l3 3-3 3M2 12h20M12 2v20"/>',
     database: '<ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v14c0 1.7 3.6 3 8 3s8-1.3 8-3V5M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/>',
+    bell: '<path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.9 1.9 0 0 0 3.4 0"/>',
+    command: '<path d="M15 6v12a3 3 0 1 0 3-3H6a3 3 0 1 0 3 3V6a3 3 0 1 0-3 3h12a3 3 0 1 0-3-3"/>',
+    columns: '<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M12 4v16"/>',
+    laptop: '<rect x="4" y="5" width="16" height="11" rx="1.5"/><path d="M2 19h20"/>',
+    filter: '<path d="M3 5h18l-7 8v6l-4 1v-7z"/>',
+    'arrow-left': '<path d="M19 12H5M12 19l-7-7 7-7"/>',
+    minus: '<path d="M5 12h14"/>',
+    circle: '<circle cx="12" cy="12" r="8"/>',
   };
 
   function icon(name, cls = '') {
@@ -205,7 +213,13 @@
     view: LS.get('view', 'explorer'),
     activeConn: LS.get('activeConn', null),
     live: false,
-    ex: { path: null, entries: [], loading: false, error: null, selected: new Set(), anchor: null, filter: '', sort: LS.get('sort', { key: 'name', dir: 1 }), back: [], fwd: [], reqId: 0 },
+    ex: { path: null, entries: [], loading: false, skeleton: false, error: null, selected: new Set(), anchor: null, filter: '', sort: LS.get('sort', { key: 'name', dir: 1 }), back: [], fwd: [], reqId: 0 },
+    // Local pane of the dual-pane explorer (this computer).
+    lx: { path: LS.get('localPath', null), loaded: false, entries: [], roots: [], sep: '/', parent: null, error: null, selected: new Set(), anchor: null, reqId: 0 },
+    dual: LS.get('dual', false),
+    cols: LS.get('cols', { size: true, modified: true, perms: false }),
+    deploySel: LS.get('deploySel', null),
+    histScope: LS.get('histScope', 'repo'),
     transfers: [],
     transferByTid: {},
     actFilter: 'all',
@@ -249,16 +263,45 @@
     return m;
   }
 
-  function confirmDialog({ title, message, confirmText = 'Confirm', danger = false, iconName = 'alert' }) {
+  /**
+   * Yes/no dialog. With typeToConfirm, the confirm button stays disabled until that exact text is
+   * typed: used for actions that cannot be undone on a production server.
+   */
+  function confirmDialog({ title, message, confirmText = 'Confirm', danger = false, iconName = 'alert', typeToConfirm = null }) {
     return new Promise((resolve) => {
       let done = false;
+      const ok = btn(confirmText, danger ? 'trash' : 'check', () => { if (!ok.disabled) { done = true; m.close(true); } }, danger ? 'danger solid' : 'primary', typeToConfirm ? { disabled: true } : { autofocus: true });
+      let typed = null;
+      if (typeToConfirm) {
+        typed = h('input', { class: 'input mono', spellcheck: 'false', autocomplete: 'off', placeholder: typeToConfirm, 'aria-label': `Type ${typeToConfirm} to confirm` });
+        typed.addEventListener('input', () => { ok.disabled = typed.value.trim() !== typeToConfirm; });
+        typed.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !ok.disabled) ok.click(); });
+      }
       const m = modal({
         title, iconName,
-        body: h('div', { style: { color: 'var(--text-2)' } }, message),
-        foot: [btn('Cancel', null, () => m.close(false)), btn(confirmText, danger ? 'trash' : 'check', () => { done = true; m.close(true); }, danger ? 'danger solid' : 'primary', { autofocus: true })],
+        body: h('div', { class: 'stack' },
+          h('div', { style: { color: 'var(--text-2)' } }, message),
+          typed && h('div', { class: 'field type-confirm' }, h('label', null, 'Type ', h('code', null, typeToConfirm), ' to confirm'), typed)),
+        foot: [btn('Cancel', null, () => m.close(false)), ok],
         onClose: (r) => resolve(done ? true : !!r && r === true),
       });
+      if (typed) setTimeout(() => typed.focus(), 40);
     });
+  }
+
+  // ---------------------------------------------------------------- environment tags
+  // A connection can be tagged Production / Staging / Development. The tag colors the header while
+  // you work on that server, and production asks for typed confirmation before destructive actions.
+  const ENVS = [
+    { v: 'production', label: 'Production' },
+    { v: 'staging', label: 'Staging' },
+    { v: 'development', label: 'Development' },
+  ];
+  const envOf = (c) => (c && ENVS.find((x) => x.v === c.env)) || null;
+  const isProd = (c) => !!c && c.env === 'production';
+  function envTag(c, cls = '') {
+    const e = envOf(c);
+    return e ? h('span', { class: `env-tag ${e.v} ${cls}`, title: `${e.label} server` }, e.label) : null;
   }
 
   function promptDialog({ title, label, value = '', placeholder = '', hint, iconName = 'edit', confirmText = 'Save', selectBase = false }) {
@@ -304,7 +347,7 @@
   // ================================================================ shell
   const VIEWS = [
     { id: 'explorer', label: 'File Explorer', icon: 'folder' },
-    { id: 'deploy', label: 'Git Deploy', icon: 'git' },
+    { id: 'deploy', label: 'Deployments', icon: 'git' },
     { id: 'activity', label: 'Activity', icon: 'activity' },
     { id: 'settings', label: 'Settings', icon: 'sliders' },
   ];
@@ -343,7 +386,7 @@
         const st = sessionOf(c.id).state;
         const item = h('div', { class: `conn-item ${c.id === S.activeConn && S.view === 'explorer' ? 'active' : ''}`, onclick: () => openConnection(c.id), title: `${c.user || 'anonymous'}@${c.host}:${c.port}` },
           h('div', { class: 'conn-avatar', title: protoLabel(c) }, icon(isSftpConn(c) ? 'terminal' : c.secure !== 'none' ? 'shield' : 'server'), h('span', { class: `dot ${st}` })),
-          h('div', { class: 'conn-meta' }, h('div', { class: 'conn-name' }, c.name), h('div', { class: 'conn-host' }, `${c.user ? c.user + '@' : ''}${c.host}`)),
+          h('div', { class: 'conn-meta' }, h('div', { class: 'conn-name' }, h('span', { class: 'n' }, c.name), envTag(c, 'sm')), h('div', { class: 'conn-host' }, `${c.user ? c.user + '@' : ''}${c.host}`)),
           ibtn('more', 'Options', (e) => { e.stopPropagation(); connMenu(c, e.clientX, e.clientY); }, 'sm')
         );
         item.addEventListener('contextmenu', (e) => { e.preventDefault(); connMenu(c, e.clientX, e.clientY); });
@@ -356,7 +399,8 @@
     const st = sessionOf(c.id).state;
     showMenu(x, y, [
       { label: 'Open', icon: 'folder', action: () => openConnection(c.id) },
-      st === 'connected' ? { label: 'Disconnect', icon: 'unplug', action: () => disconnect(c.id) } : { label: 'Connect', icon: 'plug', action: () => connectNow(c.id) },
+      st === 'connected' || st === 'connecting' ? { label: 'Disconnect', icon: 'unplug', action: () => disconnect(c.id) } : { label: 'Connect', icon: 'plug', action: () => connectNow(c.id) },
+      isSftpConn(c) && { label: 'Open terminal', icon: 'terminal', action: () => openTerminal(c.id, c.id === S.activeConn ? S.ex.path : null) },
       { label: 'Edit…', icon: 'edit', action: () => openConnectionForm(c) },
       { label: 'Duplicate', icon: 'copy', action: () => openConnectionForm({ ...c, id: null, name: `${c.name} (copy)` }) },
       '-',
@@ -366,9 +410,14 @@
 
   function renderSideFooter() {
     const theme = document.documentElement.dataset.theme;
-    setKids($('#sideFooter'), 
+    const running = runningOps().length;
+    const bell = ibtn('bell', 'Activity center', (e) => toggleActivityCenter(e.currentTarget), 'sm bell-btn', { id: 'bellBtn' });
+    if (running) bell.append(h('span', { class: 'bell-count' }, running));
+    setKids($('#sideFooter'),
       h('span', { class: `dot ${S.live ? 'live' : 'offline'}` }),
-      h('span', { class: 'grow' }, S.live ? 'Live · local server' : 'Offline · reconnecting…'),
+      h('span', { class: 'grow' }, S.live ? 'Local server' : 'Offline · reconnecting…'),
+      ibtn('command', 'Command palette (Ctrl+K)', openPalette, 'sm'),
+      bell,
       ibtn(theme === 'light' ? 'moon' : 'sun', 'Toggle theme', () => setTheme(theme === 'light' ? 'dark' : 'light'), 'sm')
     );
   }
@@ -391,22 +440,19 @@
       }
       const st = sessionOf(c.id).state;
       S._tbState = st;
-      setKids(tb, 
-        h('div', { style: { minWidth: 0 } }, h('h1', null, c.name), h('div', { class: 'sub mono' }, `${c.user || 'anonymous'}@${c.host}:${c.port} · ${protoLabel(c)}`)),
+      setKids(tb,
+        h('div', { style: { minWidth: 0 } }, h('h1', null, c.name, envTag(c)), h('div', { class: 'sub mono' }, `${c.user || 'anonymous'}@${c.host}:${c.port} · ${protoLabel(c)}`)),
         h('div', { class: 'spacer' }),
         h('div', { class: 'pill', id: 'sessionPill' }),
         isSftpConn(c) ? btn('Terminal', 'terminal', toggleTerminal, '', { title: 'Open an SSH terminal on this server' }) : null,
-        st === 'connected' || st === 'connecting'
-          ? btn('Disconnect', 'unplug', () => disconnect(c.id))
-          : btn('Connect', 'plug', () => connectNow(c.id)),
-        ibtn('edit', 'Edit connection', () => openConnectionForm(c))
+        ibtn('more', 'Connection options', (e) => { const r = e.currentTarget.getBoundingClientRect(); connMenu(c, r.right - 200, r.bottom + 6); })
       );
       updateSessionPill();
     } else if (S.view === 'deploy') {
-      setKids(tb, 
-        h('div', null, h('h1', null, 'Git Deploy'), h('div', { class: 'sub' }, 'Push to your branch — mapped folders are uploaded to your server automatically')),
+      setKids(tb,
+        h('div', null, h('h1', null, 'Deployments'), h('div', { class: 'sub' }, deploySummary())),
         h('div', { class: 'spacer' }),
-        btn('Check all now', 'refresh', checkAll),
+        S.repos.length ? btn('Check for pushes', 'refresh', checkAll, '', { title: 'Ask every repository for new commits now' }) : null,
         btn('Add repository', 'plus', () => openRepoForm(), 'primary')
       );
     } else if (S.view === 'activity') {
@@ -432,25 +478,32 @@
     let dot = s.state;
     let text;
     switch (s.state) {
-      case 'connected': {
-        if (s.busy > 0) { text = 'Connected · working…'; break; }
-        const left = Math.max(0, (s.lastActivity || Date.now()) + (s.idleTimeoutMs || 600000) - Date.now());
-        const m = Math.floor(left / 60000);
-        const sec = Math.floor((left % 60000) / 1000);
-        text = `Connected · idle disconnect in ${m}:${String(sec).padStart(2, '0')}`;
-        break;
-      }
+      case 'connected': text = s.busy > 0 ? 'Working…' : 'Connected'; break;
       case 'connecting': text = 'Connecting…'; break;
-      case 'idle': text = 'Sleeping (idle) · reconnects on demand'; break;
+      case 'idle': text = 'Sleeping'; break;
       case 'error': {
         const msg = String(s.error || 'connection failed').split(/\.\s/)[0];
         text = `Error · ${msg.length > 48 ? msg.slice(0, 47) + '…' : msg}`;
         break;
       }
-      default: text = 'Not connected · connects on demand'; dot = 'disconnected';
+      default: text = 'Not connected'; dot = 'disconnected';
     }
     setKids(pill, h('span', { class: `dot ${dot}` }), text);
-    pill.title = s.state === 'connected' ? 'The connection is closed after the idle timeout. Your saved credentials are reused automatically — no need to log in again.' : s.state === 'error' ? s.error || '' : '';
+    pill.title = s.state === 'connected' ? 'The connection is closed after the idle timeout. Your saved credentials are reused automatically — no need to log in again.'
+      : s.state === 'idle' ? 'Closed after inactivity. The next action reconnects with your saved credentials.'
+        : s.state === 'error' ? s.error || '' : 'Connects on the next action.';
+    updateIdleInfo();
+  }
+
+  /** Idle countdown, shown quietly in the status bar instead of the header. */
+  function updateIdleInfo() {
+    const el = $('#idleInfo');
+    const c = conn();
+    if (!el || !c) return;
+    const s = sessionOf(c.id);
+    if (s.state !== 'connected' || s.busy > 0) { el.textContent = ''; return; }
+    const left = Math.max(0, (s.lastActivity || Date.now()) + (s.idleTimeoutMs || 600000) - Date.now());
+    el.textContent = `Idle disconnect in ${Math.floor(left / 60000)}:${String(Math.floor((left % 60000) / 1000)).padStart(2, '0')}`;
   }
 
   function renderContent() {
@@ -463,6 +516,8 @@
   }
 
   function renderAll() {
+    const c = conn();
+    $('.main').dataset.env = S.view === 'explorer' && c && c.env ? c.env : '';
     renderNav();
     renderConnList();
     renderSideFooter();
@@ -495,7 +550,7 @@
   }
 
   async function deleteConnection(c) {
-    if (!(await confirmDialog({ title: `Delete "${c.name}"?`, message: 'The saved connection and its stored password will be removed from this computer. Files on the server are not touched.', confirmText: 'Delete', danger: true }))) return;
+    if (!(await confirmDialog({ title: `Delete "${c.name}"?`, message: 'The saved connection and its stored password will be removed from this computer. Files on the server are not touched.', confirmText: 'Delete', danger: true, typeToConfirm: isProd(c) ? c.name : null }))) return;
     try {
       await api('DELETE', `/api/connections/${c.id}`);
       if (S.activeConn === c.id) { S.activeConn = null; LS.set('activeConn', null); }
@@ -539,7 +594,7 @@
     const f = {
       name: h('input', { class: 'input', value: e.name || '', placeholder: '(optional) e.g. My website — defaults to the host' }),
       ftpsMode: h('select', { class: 'select' }, h('option', { value: 'ftps-explicit' }, 'Explicit TLS (port 21, most common)'), h('option', { value: 'ftps-implicit' }, 'Implicit TLS (port 990)')),
-      host: h('input', { class: 'input mono', value: e.host || '', placeholder: 'server.example.com  or  user@1.2.3.4:22', spellcheck: 'false', autofocus: true }),
+      host: h('input', { class: 'input mono', value: e.host || '', placeholder: 'server.example.com  or paste sftp://user@host:22/~/www', spellcheck: 'false', autofocus: true }),
       port: h('input', { class: 'input mono', type: 'number', value: e.port || 22, min: 1, max: 65535 }),
       user: h('input', { class: 'input mono', value: e.user || '', placeholder: 'username', autocomplete: 'off', spellcheck: 'false' }),
       password: h('input', { class: 'input mono', type: 'password', placeholder: isEdit && e.hasPassword ? '•••••••• (saved — leave empty to keep)' : 'password', autocomplete: 'new-password' }),
@@ -552,13 +607,20 @@
       clearKey: h('input', { type: 'checkbox' }),
     };
     if (proto.startsWith('ftps')) f.ftpsMode.value = proto;
+    let env = e.env || '';
+    const envSeg = h('div', { class: 'seg env-seg', role: 'radiogroup', 'aria-label': 'Environment' });
+    const renderEnvSeg = () => setKids(envSeg, [{ v: '', label: 'None' }, ...ENVS].map((x) =>
+      h('button', { type: 'button', role: 'radio', 'aria-checked': env === x.v ? 'true' : 'false', class: `${env === x.v ? 'active' : ''} ${x.v}`, onclick: () => { env = x.v; renderEnvSeg(); } },
+        x.v ? h('span', { class: `env-dot ${x.v}` }) : null, x.label)));
+    renderEnvSeg();
     if (!isEdit && !e.port) f.port.value = 22;
     let lastProto = proto;
 
-    // Paste "user@host:port" (or ssh://user@host:port) into Host and the fields fill themselves.
+    // Paste "user@host:port" or a full URL (sftp://user@host:22/~/www) into Host and the fields fill themselves.
     const parseHost = () => {
-      const m = /^(?:(ssh|sftp|ftps?):\/\/)?(?:([^@\s/]+)@)?([^:@\s/]+)(?::(\d+))?\/?$/i.exec(f.host.value.trim());
-      if (!m || (!m[1] && !m[2] && !m[4])) return;
+      const m = /^(?:(ssh|sftp|ftps?):\/\/)?(?:([^@\s/]+)@)?([^:@\s/]+)(?::(\d+))?(\/\S*)?$/i.exec(f.host.value.trim());
+      if (!m || (!m[1] && !m[2] && !m[4] && !m[5])) return;
+      if (m[5] && m[5] !== '/') f.remoteRoot.value = /^\/~(\/|$)/.test(m[5]) ? m[5].slice(1) : decodeURIComponent(m[5]);
       const scheme = (m[1] || '').toLowerCase();
       if (scheme === 'ssh' || scheme === 'sftp') setProto('sftp');
       else if (scheme === 'ftps') setProto(f.ftpsMode.value);
@@ -607,7 +669,7 @@
       sshBox.style.display = p === 'sftp' ? '' : 'none';
       ftpsBox.style.display = p.startsWith('ftps') ? '' : 'none';
       pwLabel.textContent = p === 'sftp' ? 'SSH password' : 'Password';
-      f.host.placeholder = p === 'sftp' ? 'server.example.com  or  user@1.2.3.4:22' : 'ftp.example.com';
+      f.host.placeholder = p === 'sftp' ? 'server.example.com  or paste sftp://user@host:22/~/www' : 'ftp.example.com  or paste ftp://user@host/public_html';
       // SSH: "/" is the real filesystem root (often unreadable on shared hosting) → start at home "~".
       if (p === 'sftp' && (f.remoteRoot.value.trim() === '/' || !f.remoteRoot.value.trim())) f.remoteRoot.value = '~';
       if (p !== 'sftp' && !f.remoteRoot.value.trim()) f.remoteRoot.value = '/';
@@ -625,6 +687,7 @@
         secure: p === 'ftps-explicit' ? 'explicit' : p === 'ftps-implicit' ? 'implicit' : 'none',
         password: f.password.value || (isEdit ? undefined : ''),
         remoteRoot: f.remoteRoot.value, allowSelfSigned: f.allowSelfSigned.checked,
+        env: env || null,
       };
       if (p === 'sftp') {
         Object.assign(d, { keyPath: f.keyPath.value, useAgent: f.useAgent.checked, trustNewHostKey });
@@ -683,6 +746,8 @@
         h('div', { class: 'grid-2' },
           h('div', { class: 'field' }, h('label', null, 'Display name'), f.name),
           h('div', { class: 'field' }, h('label', null, 'Start folder'), f.remoteRoot, h('div', { class: 'hint' }, '~ = your home folder, e.g. ~/public_html'))),
+        h('div', { class: 'field' }, h('label', null, 'Environment'), envSeg,
+          h('div', { class: 'hint' }, 'Production colors the header red while you work on this server and asks you to type its name before deleting files.')),
         h('div', { class: 'callout' }, icon('lock'), h('div', null, 'Passwords and keys are encrypted (AES-256-GCM) and stored only on this computer. The app reconnects with them automatically, so you never log in again after an idle disconnect.')),
         result,
         h('button', { type: 'submit', hidden: true })
@@ -867,15 +932,16 @@
       if (S.connections.length) { openConnection(S.connections[0].id); return; }
       setKids(ct, h('div', { class: 'empty' }, h('div', null,
         h('div', { class: 'big' }, icon('server')),
-        h('h3', null, 'Connect your first FTP server'),
-        h('p', null, 'Add an FTP or FTPS server to browse files, drag & drop uploads and set up automatic deploys from Git.'),
+        h('h3', null, 'Connect your first server'),
+        h('p', null, 'Add an SSH, FTP or FTPS server to browse files, drag & drop uploads and set up automatic deploys from Git.'),
         btn('New connection', 'plus', () => openConnectionForm(), 'primary'))));
       return;
     }
     ct.className = 'content flush';
     const ex = S.ex;
-    const search = h('input', { class: 'input', placeholder: 'Filter this folder…', value: ex.filter, oninput: (e) => { ex.filter = e.target.value; renderFileTable(); } });
+    const search = h('input', { class: 'input', placeholder: 'Filter this folder…', value: ex.filter, 'aria-label': 'Filter this folder', oninput: (e) => { ex.filter = e.target.value; renderFileTable(); } });
     const toolbar = h('div', { class: 'toolbar' },
+      ibtn('columns', S.dual ? 'Hide the local folder pane' : 'Show a local folder pane (this computer) next to the server', toggleDual, S.dual ? 'on' : '', { 'aria-pressed': S.dual ? 'true' : 'false' }),
       h('div', { class: 'btn-group' },
         ibtn('chevron-left', 'Back (Alt+←)', goBack, '', { id: 'btnBack', disabled: !ex.back.length }),
         ibtn('chevron-right', 'Forward (Alt+→)', goFwd, '', { id: 'btnFwd', disabled: !ex.fwd.length }),
@@ -901,7 +967,12 @@
       h('div', { id: 'tableHost' })
     );
     const status = h('div', { class: 'statusbar', id: 'statusbar' });
-    setKids(ct, toolbar, wrap, status);
+    const remotePane = h('div', { class: 'remote-pane' }, toolbar, wrap, status);
+    if (S.dual) {
+      const localPane = h('div', { class: 'local-pane', id: 'localPane' });
+      setKids(ct, h('div', { class: 'explorer-split' }, localPane, remotePane));
+      renderLocalPane();
+    } else setKids(ct, remotePane);
     bindDrop(wrap);
     wrap.addEventListener('contextmenu', (e) => {
       if (e.target.closest('tr.file-row')) return;
@@ -978,6 +1049,8 @@
     ex.loading = true;
     const bar = $('#loadingBar');
     if (bar) bar.style.display = '';
+    // Opening another folder: show placeholder rows if it takes more than a moment.
+    if (p !== ex.path) setTimeout(() => { if (ex.reqId === req && ex.loading) { ex.skeleton = true; renderFileTable(); } }, 180);
     try {
       const r = await api('GET', `/api/ftp/${c.id}/list?${q({ path: p || c.remoteRoot || '/' })}`);
       if (req !== ex.reqId || conn() !== c) return;
@@ -1000,9 +1073,10 @@
     } finally {
       if (req === ex.reqId) {
         ex.loading = false;
+        ex.skeleton = false;
         const b = $('#loadingBar');
         if (b) b.style.display = 'none';
-        if (S.view === 'explorer') { renderCrumbs(); renderFileTable(); updateNavButtons(); }
+        if (S.view === 'explorer') { renderCrumbs(); renderFileTable(); updateNavButtons(); if (S.dual) renderLocalPane(); }
       }
     }
   }
@@ -1072,18 +1146,19 @@
           keyChanged ? btn('Trust new host key', 'shield', trustNewKey, 'danger') : null))));
       return;
     }
-    if (ex.path === null) { setKids(host, h('div', { class: 'empty' }, h('div', null, icon('loader', 'spin'), h('p', null, 'Connecting…')))); return; }
+    if (ex.path === null || ex.skeleton) { setKids(host, skeletonTable(S.cols)); return; }
     const sortIc = (k) => (ex.sort.key === k ? icon(ex.sort.dir > 0 ? 'chevron-up' : 'chevron-down') : null);
     const allSel = list.length > 0 && list.every((e) => ex.selected.has(e.path));
     const someSel = !allSel && list.some((e) => ex.selected.has(e.path));
     const head = h('thead', null, h('tr', null,
-      h('th', { class: 'cb nosort' }, h('input', { type: 'checkbox', checked: allSel, indeterminate: someSel, onclick: (e) => { e.stopPropagation(); if (allSel) ex.selected.clear(); else list.forEach((x) => ex.selected.add(x.path)); renderFileTable(); } })),
+      h('th', { class: 'cb nosort' }, h('input', { type: 'checkbox', checked: allSel, indeterminate: someSel, 'aria-label': 'Select all', onclick: (e) => { e.stopPropagation(); if (allSel) ex.selected.clear(); else list.forEach((x) => ex.selected.add(x.path)); renderFileTable(); } })),
       h('th', { onclick: () => sortBy('name') }, 'Name ', sortIc('name')),
-      h('th', { onclick: () => sortBy('size'), style: { textAlign: 'right' } }, 'Size ', sortIc('size')),
+      h('th', { onclick: () => sortBy('size'), class: 'size', style: { textAlign: 'right' } }, 'Size ', sortIc('size')),
       h('th', { onclick: () => sortBy('modified'), class: 'date' }, 'Modified ', sortIc('modified')),
       h('th', { class: 'nosort perm' }, 'Perms'),
       h('th', { class: 'nosort' }, '')
     ));
+    head.addEventListener('contextmenu', (e) => { e.preventDefault(); columnMenu(e.clientX, e.clientY); });
     const body = h('tbody');
     if (!list.length) {
       body.append(h('tr', null, h('td', { colspan: 6 }, h('div', { class: 'empty', style: { padding: '50px 20px' } }, h('div', null,
@@ -1097,7 +1172,7 @@
       const tr = h('tr', { class: `file-row ${sel ? 'selected' : ''}`, draggable: 'true', dataset: { path: e.path } },
         h('td', { class: 'cb' }, h('input', { type: 'checkbox', checked: sel, onclick: (ev) => { ev.stopPropagation(); toggleSel(e.path); } })),
         h('td', { class: 'name', title: e.link ? `${e.name} → ${e.link}` : e.name }, h('span', { class: 'fname' }, h('span', { class: `ficon ${k.cls}` }, icon(k.ic)), h('span', { class: 'n' }, e.name))),
-        h('td', { class: 'num', style: { textAlign: 'right' } }, e.type === 'dir' ? '—' : fmtSize(e.size)),
+        h('td', { class: 'num size', style: { textAlign: 'right' } }, e.type === 'dir' ? '' : fmtSize(e.size)),
         h('td', { class: 'date', title: e.rawModifiedAt }, e.modifiedAt ? fmtDate(e.modifiedAt) : e.rawModifiedAt),
         h('td', { class: 'perm', title: e.mode }, e.permissions),
         h('td', { style: { textAlign: 'right' } }, h('span', { class: 'row-actions' },
@@ -1114,7 +1189,8 @@
       tr.addEventListener('dragstart', (ev) => {
         if (!ex.selected.has(e.path)) { ex.selected = new Set([e.path]); renderFileTable(); }
         ev.dataTransfer.setData('application/x-ftpgit', JSON.stringify([...ex.selected]));
-        ev.dataTransfer.effectAllowed = 'move';
+        ev.dataTransfer.setData('application/x-ftpgit-remote', JSON.stringify(selectedEntries().map((x) => ({ path: x.path, type: x.type, size: x.size }))));
+        ev.dataTransfer.effectAllowed = 'copyMove';
       });
       if (e.type === 'dir') {
         tr.addEventListener('dragover', (ev) => { ev.preventDefault(); ev.stopPropagation(); tr.classList.add('drop-target'); $('#dropzone').classList.remove('show'); });
@@ -1123,7 +1199,27 @@
       }
       body.append(tr);
     }
-    setKids(host, h('table', { class: 'files' }, head, body));
+    setKids(host, h('table', { class: `files ${colClasses()} ${ex.selected.size ? 'has-sel' : ''}` }, head, body));
+  }
+
+  const colClasses = () => ['size', 'modified', 'perms'].filter((k) => !S.cols[k]).map((k) => `hide-${k}`).join(' ');
+
+  function columnMenu(x, y) {
+    const item = (k, label) => ({ label, icon: S.cols[k] ? 'check' : 'minus', action: () => { S.cols[k] = !S.cols[k]; LS.set('cols', S.cols); renderFileTable(); } });
+    showMenu(x, y, [item('size', 'Size'), item('modified', 'Modified'), item('perms', 'Permissions')]);
+  }
+
+  /** Placeholder rows while a folder loads. */
+  function skeletonTable(cols) {
+    const widths = [46, 30, 62, 38, 54, 26, 44, 34];
+    return h('table', { class: `files skeleton ${colClasses()}`, 'aria-busy': 'true' },
+      h('tbody', null, widths.map((w) => h('tr', null,
+        h('td', { class: 'cb' }),
+        h('td', { class: 'name' }, h('span', { class: 'fname' }, h('span', { class: 'ficon sk' }), h('span', { class: 'sk-bar', style: { width: `${w * 3}px` } }))),
+        cols.size !== false ? h('td', { class: 'size' }, h('span', { class: 'sk-bar', style: { width: '48px' } })) : null,
+        h('td', { class: 'date' }, h('span', { class: 'sk-bar', style: { width: '110px' } })),
+        h('td', { class: 'perm' }, h('span', { class: 'sk-bar', style: { width: '70px' } })),
+        h('td')))));
   }
 
   function renderStatusbar(list) {
@@ -1133,15 +1229,18 @@
     const sel = ex.entries.filter((e) => ex.selected.has(e.path));
     const files = (list || ex.entries).filter((e) => e.type !== 'dir');
     const dirs = (list || ex.entries).length - files.length;
-    setKids(sb, 
+    setKids(sb,
       h('span', null, `${dirs} folder${dirs === 1 ? '' : 's'}, ${files.length} file${files.length === 1 ? '' : 's'} · ${fmtSize(files.reduce((n, f) => n + (f.size || 0), 0))}`),
       sel.length ? h('span', { style: { color: 'var(--text)' } }, `${sel.length} selected${sel.some((s) => s.type !== 'dir') ? ` · ${fmtSize(sel.filter((s) => s.type !== 'dir').reduce((n, f) => n + (f.size || 0), 0))}` : ''}`) : null,
       sel.length ? h('span', { class: 'btn-group' },
-        sel.some((s) => s.type !== 'dir') && btn('Download', 'download', () => download(sel), 'sm ghost'),
+        S.dual && S.lx.path ? btn('Download to local', 'arrow-left', () => downloadToLocal(sel), 'sm ghost', { title: `Copy to ${S.lx.path}` }) : null,
+        !S.dual && sel.some((s) => s.type !== 'dir') && btn('Download', 'download', () => download(sel), 'sm ghost'),
         btn('Delete', 'trash', () => deleteEntries(sel), 'sm ghost danger')) : null,
       h('span', { class: 'spacer' }),
-      h('span', { class: 'kbd-hint' }, h('kbd', null, 'Del'), 'delete', h('kbd', null, 'F2'), 'rename', h('kbd', null, 'Ctrl+A'), 'select all')
+      h('span', { class: 'idle-info', id: 'idleInfo' }),
+      h('span', { class: 'kbd-hint' }, h('kbd', null, 'Del'), 'delete', h('kbd', null, 'F2'), 'rename', h('kbd', null, 'Ctrl+K'), 'commands')
     );
+    updateIdleInfo();
   }
 
   function toggleSel(p) {
@@ -1277,7 +1376,8 @@
       h('p', { style: { marginTop: 0 } }, entries.length === 1 ? `"${entries[0].name}" will be permanently deleted from the server.` : `${entries.length} items will be permanently deleted from the server.`),
       dirs ? h('div', { class: 'callout err' }, icon('alert'), `${dirs} folder${dirs > 1 ? 's' : ''} will be deleted with everything inside.`) : null,
       entries.length > 1 ? h('div', { class: 'hint', style: { marginTop: '10px', maxHeight: '120px', overflow: 'auto' } }, entries.slice(0, 50).map((e) => h('div', { class: 'mono' }, e.path))) : null);
-    if (!(await confirmDialog({ title: 'Delete from server?', message: msg, confirmText: 'Delete', danger: true }))) return;
+    const c = conn();
+    if (!(await confirmDialog({ title: isProd(c) ? `Delete from ${c.name}?` : 'Delete from server?', message: msg, confirmText: 'Delete', danger: true, typeToConfirm: isProd(c) ? c.name : null }))) return;
     try {
       const r = await api('POST', `/api/ftp/${S.activeConn}/delete`, { items: entries.map((e) => ({ path: e.path, type: e.type })) });
       const failed = r.results.filter((x) => !x.ok);
@@ -1334,14 +1434,15 @@
   let dragDepth = 0;
   function bindDrop(wrap) {
     const dz = () => $('#dropzone');
+    const accepts = (e) => e.dataTransfer.types.includes('Files') || e.dataTransfer.types.includes('application/x-ftpgit-local');
     wrap.addEventListener('dragenter', (e) => {
-      if (!e.dataTransfer.types.includes('Files')) return;
+      if (!accepts(e)) return;
       e.preventDefault();
       dragDepth++;
       $('#dropHint').textContent = `into ${S.ex.path}`;
       dz().classList.add('show');
     });
-    wrap.addEventListener('dragover', (e) => { if (e.dataTransfer.types.includes('Files')) { e.preventDefault(); e.dataTransfer.dropEffect = 'copy'; if (!e.target.closest('tr.file-row')) dz().classList.add('show'); } });
+    wrap.addEventListener('dragover', (e) => { if (accepts(e)) { e.preventDefault(); e.dataTransfer.dropEffect = 'copy'; if (!e.target.closest('tr.file-row')) dz().classList.add('show'); } });
     wrap.addEventListener('dragleave', () => { dragDepth = Math.max(0, dragDepth - 1); if (!dragDepth) dz().classList.remove('show'); });
     wrap.addEventListener('drop', (e) => {
       e.preventDefault();
@@ -1352,6 +1453,8 @@
   }
 
   function handleDrop(dt, destDir) {
+    const fromLocal = dt.getData('application/x-ftpgit-local');
+    if (fromLocal) { uploadLocal(JSON.parse(fromLocal), destDir); return; }
     const internal = dt.getData('application/x-ftpgit');
     if (internal) { moveEntries(JSON.parse(internal), destDir); return; }
     const entries = [...(dt.items || [])].filter((i) => i.kind === 'file').map((i) => (i.webkitGetAsEntry ? i.webkitGetAsEntry() : null));
@@ -1415,6 +1518,7 @@
     const job = { id: uid(), label, dest: destDir, cid, count: items.length, total, sent: 0, ftp: 0, phase: 'sending', status: 'running', ok: 0, failures: [], current: '' };
     S.transfers.unshift(job);
     renderTransfers();
+    renderSideFooter();
     const batches = [];
     let cur = [], curSize = 0;
     for (const it of items) {
@@ -1444,6 +1548,7 @@
     }
     job.phase = 'done';
     renderTransfers();
+    renderSideFooter();
     if (job.status === 'done') toast('success', `Uploaded ${job.ok} file${job.ok > 1 ? 's' : ''}`, `to ${destDir}`);
     else toast('error', `Upload finished with ${job.failures.length} error(s)`, job.failures[0] && job.failures[0].error);
     if (S.view === 'explorer' && S.activeConn === cid && S.ex.path && (S.ex.path === destDir || destDir.startsWith(S.ex.path === '/' ? '/' : S.ex.path + '/'))) loadDir(S.ex.path);
@@ -1463,7 +1568,7 @@
     const items = list.map((j) => {
       const pct = j.total ? (j.phase === 'sending' ? j.sent / j.total : j.ftp / j.total) * 100 : j.status === 'running' ? 0 : 100;
       let sub;
-      if (j.status === 'running') sub = j.phase === 'sending' ? `Sending to app · ${Math.round(pct)}%` : `Uploading to server · ${Math.round(pct)}% ${j.current ? '· ' + j.current : ''}`;
+      if (j.status === 'running') sub = j.phase === 'sending' ? `Sending to app · ${Math.round(pct)}%` : `${j.dir === 'down' ? 'Downloading' : 'Uploading to server'} · ${Math.round(pct)}% ${j.current ? '· ' + j.current : ''}`;
       else if (j.status === 'done') sub = `Done · ${j.ok} file${j.ok > 1 ? 's' : ''} · ${fmtSize(j.total)}`;
       else sub = `${j.failures.length} failed · ${j.ok} uploaded`;
       return h('div', { class: 'tr-item' },
@@ -1472,13 +1577,174 @@
           h('span', { class: 'n', title: j.label }, j.label),
           j.status === 'error' && h('button', { class: 'btn sm ghost', onclick: () => showFailures(j) }, 'Details')),
         j.status === 'running' && h('div', { class: 'progress' }, h('div', { style: { width: `${Math.max(2, pct)}%` } })),
-        h('div', { class: 'tr-sub' }, h('span', null, sub), h('span', { class: 'mono' }, `→ ${j.dest}`)));
+        h('div', { class: 'tr-sub' }, h('span', null, sub), h('span', { class: 'mono', title: j.dest }, `→ ${j.dest}`)));
     });
     setKids(el, 
       h('div', { class: 'transfers-head' }, icon('upload-cloud'), h('span', { class: 'grow' }, active ? `Uploading (${active})` : 'Transfers'),
         ibtn(trCollapsed ? 'chevron-up' : 'chevron-down', trCollapsed ? 'Expand' : 'Collapse', () => { trCollapsed = !trCollapsed; renderTransfers(); }, 'sm'),
         ibtn('x', 'Clear finished', () => { S.transfers = S.transfers.filter((j) => j.status === 'running'); renderTransfers(); }, 'sm')),
       h('div', { class: 'transfers-body' }, items));
+    renderActivityCenter();
+  }
+
+  // ---------------------------------------------------------------- local pane (dual-pane explorer)
+  const localBase = (p) => String(p || '').replace(/[\\/]+$/, '').split(/[\\/]/).pop() || p;
+
+  function toggleDual() {
+    S.dual = !S.dual;
+    LS.set('dual', S.dual);
+    renderContent();
+  }
+
+  async function loadLocal(p) {
+    const lx = S.lx;
+    const req = ++lx.reqId;
+    try {
+      const r = await api('GET', `/api/local/list?${q({ path: p || '' })}`);
+      if (req !== lx.reqId) return;
+      if (r.path !== lx.path) { lx.selected.clear(); lx.anchor = null; }
+      Object.assign(lx, { path: r.path, entries: r.entries, roots: r.roots, sep: r.sep, parent: r.parent, error: null, loaded: true });
+      LS.set('localPath', r.path);
+    } catch (e) {
+      if (req !== lx.reqId) return;
+      if (!lx.loaded && p) return loadLocal(''); // saved folder is gone: start at home
+      lx.error = e.message;
+      toast('error', 'Could not open local folder', e.message);
+    }
+    renderLocalPane();
+  }
+
+  function renderLocalPane() {
+    const host = $('#localPane');
+    if (!host) return;
+    const lx = S.lx;
+    if (!lx.loaded && !lx.error) { setKids(host, h('div', { class: 'pane-head' }, icon('laptop'), h('b', null, 'This computer')), skeletonTable({ size: true })); loadLocal(lx.path || ''); return; }
+    const pathInput = h('input', { class: 'input mono', value: lx.path || '', spellcheck: 'false', 'aria-label': 'Local folder path' });
+    pathInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') loadLocal(pathInput.value.trim()); });
+    const roots = lx.roots.length > 1
+      ? h('select', { class: 'select roots', title: 'Drive', 'aria-label': 'Drive', onchange: (e) => loadLocal(e.target.value) },
+        lx.roots.map((r) => h('option', { value: r, selected: (lx.path || '').toUpperCase().startsWith(r.toUpperCase()) }, r.replace(/\\$/, ''))))
+      : null;
+    const sel = lx.entries.filter((e) => lx.selected.has(e.path));
+    const files = lx.entries.filter((e) => e.type !== 'dir');
+    const uploadBtn = btn(sel.length ? `Upload ${sel.length} to server` : 'Upload to server', 'arrow-right', () => uploadLocal(sel.map((e) => e.path), S.ex.path), 'sm primary', { disabled: !sel.length || !S.ex.path, title: S.ex.path ? `Copy to ${S.ex.path}` : '' });
+    const tableHost = h('div', { class: 'table-wrap local-wrap' });
+    setKids(host,
+      h('div', { class: 'pane-head' },
+        icon('laptop'), h('b', null, 'This computer'), h('span', { class: 'spacer' }),
+        ibtn('home', 'Home folder', () => loadLocal('~'), 'sm'),
+        ibtn('arrow-up', 'Parent folder', () => lx.parent && loadLocal(lx.parent), 'sm', { disabled: !lx.parent }),
+        ibtn('refresh', 'Refresh', () => loadLocal(lx.path), 'sm')),
+      h('div', { class: 'pane-path' }, roots, pathInput),
+      tableHost,
+      h('div', { class: 'statusbar' },
+        h('span', null, sel.length ? `${sel.length} selected` : `${lx.entries.length - files.length} folders, ${files.length} files`),
+        h('span', { class: 'spacer' }), uploadBtn));
+    renderLocalTable(tableHost);
+    // Server rows dropped here are downloaded into this folder.
+    host.ondragover = (e) => { if (e.dataTransfer.types.includes('application/x-ftpgit-remote')) { e.preventDefault(); e.dataTransfer.dropEffect = 'copy'; host.classList.add('drop-on'); } };
+    host.ondragleave = (e) => { if (!host.contains(e.relatedTarget)) host.classList.remove('drop-on'); };
+    host.ondrop = (e) => {
+      host.classList.remove('drop-on');
+      const raw = e.dataTransfer.getData('application/x-ftpgit-remote');
+      if (!raw) return;
+      e.preventDefault();
+      e.stopPropagation();
+      downloadToLocal(JSON.parse(raw));
+    };
+  }
+
+  function renderLocalTable(host) {
+    const lx = S.lx;
+    if (lx.error && !lx.entries.length) { setKids(host, h('div', { class: 'empty' }, h('div', null, h('p', null, lx.error)))); return; }
+    const list = lx.entries;
+    const body = h('tbody');
+    for (const e of list) {
+      const k = fileKind(e);
+      const tr = h('tr', { class: `file-row ${lx.selected.has(e.path) ? 'selected' : ''}`, draggable: 'true' },
+        h('td', { class: 'name', title: e.path }, h('span', { class: 'fname' }, h('span', { class: `ficon ${k.cls}` }, icon(k.ic)), h('span', { class: 'n' }, e.name))),
+        h('td', { class: 'num size', style: { textAlign: 'right' } }, e.type === 'dir' ? '' : fmtSize(e.size)),
+        h('td', { class: 'date' }, fmtDate(e.modifiedAt)));
+      tr.addEventListener('click', (ev) => {
+        if (ev.shiftKey && lx.anchor) {
+          const a = list.findIndex((x) => x.path === lx.anchor);
+          const b = list.findIndex((x) => x.path === e.path);
+          lx.selected = new Set(list.slice(Math.min(a, b), Math.max(a, b) + 1).map((x) => x.path));
+        } else if (ev.ctrlKey || ev.metaKey) {
+          if (lx.selected.has(e.path)) lx.selected.delete(e.path); else lx.selected.add(e.path);
+          lx.anchor = e.path;
+        } else { lx.selected = new Set([e.path]); lx.anchor = e.path; }
+        renderLocalPane();
+      });
+      tr.addEventListener('dblclick', () => { if (e.type === 'dir') loadLocal(e.path); });
+      tr.addEventListener('dragstart', (ev) => {
+        if (!lx.selected.has(e.path)) { lx.selected = new Set([e.path]); }
+        ev.dataTransfer.setData('application/x-ftpgit-local', JSON.stringify([...lx.selected]));
+        ev.dataTransfer.effectAllowed = 'copy';
+      });
+      body.append(tr);
+    }
+    if (!list.length) body.append(h('tr', null, h('td', { colspan: 3 }, h('div', { class: 'empty', style: { padding: '40px 20px' } }, h('div', null, h('p', null, 'This folder is empty.'))))));
+    setKids(host, h('table', { class: 'files local' }, body));
+  }
+
+  function localJob(label, dest, dir) {
+    const job = { id: uid(), label, dest, cid: S.activeConn, count: 0, total: 0, sent: 0, ftp: 0, phase: 'ftp', status: 'running', ok: 0, failures: [], current: '', dir };
+    S.transfers.unshift(job);
+    renderTransfers();
+    renderSideFooter();
+    return job;
+  }
+
+  function finishJob(job, results) {
+    for (const x of results) { if (x.ok) job.ok++; else job.failures.push(x); }
+    job.status = job.failures.length ? 'error' : 'done';
+    job.phase = 'done';
+    job.ftp = job.total;
+    renderTransfers();
+    renderSideFooter();
+  }
+
+  async function uploadLocal(paths, destDir) {
+    const cid = S.activeConn;
+    if (!paths.length || !cid || !destDir) return;
+    const job = localJob(paths.length === 1 ? localBase(paths[0]) : `${paths.length} items`, destDir, 'up');
+    const tid = uid();
+    S.transferByTid[tid] = { job, base: 0 };
+    try {
+      const r = await api('POST', `/api/ftp/${cid}/upload-local`, { paths, dest: destDir, tid });
+      job.total = r.total;
+      finishJob(job, r.results);
+    } catch (e) { finishJob(job, [{ path: '(upload)', ok: false, error: e.message }]); }
+    delete S.transferByTid[tid];
+    if (job.status === 'done') toast('success', `Uploaded ${job.ok} file${job.ok === 1 ? '' : 's'}`, `to ${destDir}`);
+    else toast('error', `Upload finished with ${job.failures.length} error(s)`, job.failures[0] && job.failures[0].error);
+    if (S.view === 'explorer' && S.activeConn === cid && S.ex.path) loadDir(S.ex.path);
+  }
+
+  async function downloadToLocal(items) {
+    const cid = S.activeConn;
+    const dest = S.lx.path;
+    if (!items.length || !cid || !dest) return;
+    const names = new Set(S.lx.entries.map((e) => e.name));
+    const clash = items.filter((it) => names.has(baseName(it.path)));
+    if (clash.length && !(await confirmDialog({
+      title: `Replace ${clash.length} item${clash.length === 1 ? '' : 's'} on this computer?`,
+      message: h('div', null, h('p', { style: { marginTop: 0 } }, `These already exist in ${dest} and will be overwritten:`), h('div', { class: 'hint mono' }, clash.slice(0, 20).map((c) => h('div', null, baseName(c.path))))),
+      confirmText: 'Replace', danger: true,
+    }))) return;
+    const job = localJob(items.length === 1 ? baseName(items[0].path) : `${items.length} items`, dest, 'down');
+    const tid = uid();
+    S.transferByTid[tid] = { job, base: 0 };
+    try {
+      const r = await api('POST', `/api/ftp/${cid}/download-local`, { items, dest, tid });
+      job.total = r.total;
+      finishJob(job, r.results);
+    } catch (e) { finishJob(job, [{ path: '(download)', ok: false, error: e.message }]); }
+    delete S.transferByTid[tid];
+    if (job.status === 'done') toast('success', `Downloaded ${job.ok} file${job.ok === 1 ? '' : 's'}`, `to ${dest}`);
+    else toast('error', `Download finished with ${job.failures.length} error(s)`, job.failures[0] && job.failures[0].error);
+    if (S.lx.path === dest) loadLocal(dest);
   }
 
   function showFailures(j) {
@@ -1507,51 +1773,142 @@
   }
 
   function triggerLabel(t) {
-    return { poll: 'Auto (poll)', 'push-hook': 'Push hook', manual: 'Manual', 'manual-full': 'Full redeploy', 'manual-scoped': 'Folder sync', initial: 'Initial' }[t] || t;
+    return { poll: 'Auto (poll)', 'push-hook': 'Push hook', manual: 'Manual', 'manual-full': 'Full redeploy', 'manual-scoped': 'Folder upload', initial: 'Initial' }[t] || t;
+  }
+
+  function deploySummary() {
+    if (!S.repos.length) return 'Push to your branch and only the changed files are uploaded to your server';
+    const day = Date.now() - 86400000;
+    const recent = S.deployments.filter((d) => Date.parse(d.startedAt) > day);
+    const fails = recent.filter((d) => d.status === 'failed').length;
+    const lastOk = S.deployments.find((d) => d.status === 'success');
+    return [
+      `${S.repos.length} ${S.repos.length === 1 ? 'repository' : 'repositories'}`,
+      `${recent.length} deploy${recent.length === 1 ? '' : 's'} in 24h`,
+      fails ? `${fails} failed` : null,
+      `last success ${lastOk ? timeAgo(lastOk.finishedAt) : 'never'}`,
+    ].filter(Boolean).join(' · ');
+  }
+
+  function selectedRepo() {
+    return S.repos.find((r) => r.id === S.deploySel) || S.repos[0] || null;
   }
 
   function renderDeploy(ct) {
-    const day = Date.now() - 86400000;
-    const recent = S.deployments.filter((d) => Date.parse(d.startedAt) > day);
-    const lastOk = S.deployments.find((d) => d.status === 'success');
-    const stats = h('div', { class: 'stats' },
-      h('div', { class: 'card stat' }, h('div', { class: 'k' }, icon('git'), 'Watched repositories'), h('div', { class: 'v' }, S.repos.length)),
-      h('div', { class: 'card stat' }, h('div', { class: 'k' }, icon('rocket'), 'Deploys (24h)'), h('div', { class: 'v' }, recent.length)),
-      h('div', { class: 'card stat' }, h('div', { class: 'k' }, icon('x-circle'), 'Failures (24h)'), h('div', { class: 'v', style: { color: recent.some((d) => d.status === 'failed') ? 'var(--danger)' : '' } }, recent.filter((d) => d.status === 'failed').length)),
-      h('div', { class: 'card stat' }, h('div', { class: 'k' }, icon('clock'), 'Last successful deploy'), h('div', { class: 'v', style: { fontSize: '17px', marginTop: '8px' } }, lastOk ? timeAgo(lastOk.finishedAt) : '—')));
-
+    const sub = $('#topbar .sub');
+    if (sub) sub.textContent = deploySummary();
     if (!S.repos.length) {
-      setKids(ct, stats, h('div', { class: 'card' }, h('div', { class: 'empty' }, h('div', null,
+      setKids(ct, h('div', { class: 'card' }, h('div', { class: 'empty' }, h('div', null,
         h('div', { class: 'big' }, icon('git')),
         h('h3', null, 'Deploy to your server on every push'),
         h('p', null, 'Link a Git repository, choose which folders go to which server folders, and every push to your branch (main by default) is uploaded automatically — only the changed files.'),
-        S.connections.length ? btn('Add repository', 'plus', () => openRepoForm(), 'primary') : btn('First, add an FTP connection', 'server', () => openConnectionForm(), 'primary')))));
+        S.connections.length ? btn('Add repository', 'plus', () => openRepoForm(), 'primary') : btn('First, add a server connection', 'server', () => openConnectionForm(), 'primary')))));
       return;
     }
+    const r = selectedRepo();
+    const list = h('nav', { class: 'repo-list', 'aria-label': 'Repositories' },
+      S.repos.map((x) => {
+        const c = conn(x.connectionId);
+        return h('button', { type: 'button', class: `repo-item ${x.id === r.id ? 'active' : ''}`, 'aria-current': x.id === r.id ? 'true' : undefined, onclick: () => { S.deploySel = x.id; LS.set('deploySel', x.id); renderContent(); } },
+          h('div', { class: 'ri-top' }, h('span', { class: `dot ${repoDot(x)}` }), h('b', null, x.name)),
+          h('div', { class: 'ri-sub' }, h('span', { class: 'mono' }, x.branch), icon('arrow-right'), h('span', { class: 'ri-conn' }, c ? c.name : '(missing)'), envTag(c, 'sm')));
+      }),
+      h('button', { type: 'button', class: 'repo-item add', onclick: () => openRepoForm() }, icon('plus'), 'Add repository'));
 
-    const cards = h('div', { class: 'repos' }, S.repos.map(repoCard));
-    const hist = S.deployments.slice(0, 40);
+    const deps = S.deployments.filter((d) => d.repoId === r.id);
+    const latest = deps.find((d) => d.status === 'running') || deps[0];
+    const latestCard = h('div', { class: 'card latest-card' },
+      h('div', { class: 'card-head' },
+        h('h3', null, latest && latest.status === 'running' ? 'Deploying now' : 'Latest deploy'),
+        latest ? depStatusBadge(latest) : null,
+        latest ? h('span', { class: 'chip' }, icon('commit'), short(latest.to)) : null,
+        latest && latest.commit ? h('span', { class: 'commit-msg grow' }, latest.commit.message) : h('span', { class: 'grow' }),
+        latest ? h('span', { class: 'hint', title: new Date(latest.startedAt).toLocaleString() }, timeAgo(latest.startedAt)) : null,
+        latest ? btn('View log', 'terminal', () => openDeployLog(latest.id), 'sm') : null),
+      latest
+        ? h('div', { class: 'card-body' }, pipelineView(latest), latest.status === 'running' ? deployProgress(latest) : null)
+        : h('div', { class: 'card-body hint' }, 'Nothing deployed yet. Push to ', h('b', null, r.branch), ' or click Deploy.'));
+
+    const scope = S.histScope;
+    const hist = (scope === 'all' ? S.deployments : deps).slice(0, 40);
+    const histSeg = h('div', { class: 'seg' },
+      h('button', { class: scope === 'repo' ? 'active' : '', onclick: () => { S.histScope = 'repo'; LS.set('histScope', 'repo'); renderContent(); } }, 'This repository'),
+      h('button', { class: scope === 'all' ? 'active' : '', onclick: () => { S.histScope = 'all'; LS.set('histScope', 'all'); renderContent(); } }, 'All'));
     const table = h('div', { class: 'card', style: { overflow: 'hidden' } }, hist.length
       ? h('table', { class: 'list' },
-        h('thead', null, h('tr', null, ['Status', 'Repository', 'Commit', 'Trigger', 'Changes', 'Duration', 'When'].map((t) => h('th', null, t)))),
-        h('tbody', null, hist.map((d) => h('tr', { class: 'click', onclick: () => openDeployLog(d.id) },
+        h('thead', null, h('tr', null, ['Status', scope === 'all' ? 'Repository' : null, 'Commit', 'Trigger', 'Changes', 'Duration', 'When'].filter(Boolean).map((t) => h('th', null, t)))),
+        h('tbody', null, hist.map((d) => h('tr', { class: 'click', tabindex: '0', onclick: () => openDeployLog(d.id), onkeydown: (e) => { if (e.key === 'Enter') openDeployLog(d.id); } },
           h('td', null, depStatusBadge(d)),
-          h('td', null, h('b', null, d.repoName)),
-          h('td', null, h('div', { class: 'row' }, h('span', { class: 'chip' }, icon('commit'), short(d.to)), h('span', { class: 'commit-msg', title: d.commit ? d.commit.message : '' }, d.commit ? d.commit.message : ''))),
-          h('td', null, h('span', { class: 'hint', title: d.scope || '' }, triggerLabel(d.trigger), d.trigger === 'manual-scoped' && d.scope ? h('div', { class: 'mono', style: { fontSize: '11px', maxWidth: '260px', overflow: 'hidden', textOverflow: 'ellipsis' } }, d.scope) : d.full ? ' · full' : '')),
-          h('td', null, d.status === 'running' ? `${d.done}/${d.total}` : h('span', null, h('span', { style: { color: 'var(--success)' } }, `↑${d.uploaded}`), ' ', h('span', { style: { color: 'var(--warn)' } }, `✕${d.deleted}`), d.failed ? h('span', { style: { color: 'var(--danger)' } }, ` ⚠${d.failed}`) : null)),
-          h('td', { class: 'hint' }, fmtDuration(d.startedAt, d.finishedAt)),
+          scope === 'all' ? h('td', null, h('b', null, d.repoName)) : null,
+          h('td', null, h('div', { class: 'row' }, d.to ? h('span', { class: 'chip' }, icon('commit'), short(d.to)) : null, h('span', { class: 'commit-msg', title: d.commit ? d.commit.message : '' }, d.commit ? d.commit.message : d.trigger === 'manual-scoped' ? 'Local files' : ''))),
+          h('td', null, h('span', { class: 'hint', title: d.scope || '' }, triggerLabel(d.trigger), d.trigger === 'manual-scoped' && d.scope ? h('div', { class: 'mono scope-line' }, d.scope) : d.full ? ' · full' : '')),
+          h('td', null, changesCell(d)),
+          h('td', { class: 'hint num' }, fmtDuration(d.startedAt, d.finishedAt)),
           h('td', { class: 'hint', title: new Date(d.startedAt).toLocaleString() }, timeAgo(d.startedAt))))))
-      : h('div', { class: 'empty', style: { padding: '30px' } }, h('div', null, h('p', null, 'No deployments yet. Push to your branch or click "Sync now".'))));
+      : h('div', { class: 'empty', style: { padding: '30px' } }, h('div', null, h('p', null, 'No deployments yet. Push to your branch or click Deploy.'))));
 
-    setKids(ct, stats, cards, h('div', { class: 'section-title' }, icon('history'), h('h2', null, 'Deployment history'), h('span', { class: 'hint' }, 'Click a row to see the full log')), table);
+    setKids(ct, h('div', { class: 'deploy-layout' },
+      list,
+      h('div', { class: 'repo-detail' },
+        repoCard(r),
+        latestCard,
+        h('div', { class: 'section-title' }, icon('history'), h('h2', null, 'History'), h('span', { class: 'grow' }), histSeg),
+        table)));
+  }
+
+  function repoDot(r) {
+    if (!r.enabled) return 'disconnected';
+    if (r.status === 'deploying' || r.status === 'checking') return 'connecting';
+    if (r.status === 'error') return 'error';
+    if (r.status === 'warning' || (r.lastRemoteSha && r.lastRemoteSha !== r.lastDeployedSha)) return 'idle';
+    return 'connected';
+  }
+
+  function changesCell(d) {
+    if (d.status === 'running') return h('span', { class: 'num' }, `${d.done}/${d.total}`);
+    return h('span', { class: 'changes num', title: `${d.uploaded} uploaded · ${d.deleted} deleted · ${d.failed} failed` },
+      h('span', { class: 'up' }, `+${d.uploaded}`),
+      h('span', { class: 'del' }, `−${d.deleted}`),
+      d.failed ? h('span', { class: 'fail' }, `${d.failed} failed`) : null);
+  }
+
+  function deployProgress(d) {
+    return h('div', { class: 'deploy-progress' },
+      h('div', { class: `progress ${d.total ? '' : 'indet'}` }, h('div', { style: { width: `${d.total ? (d.done / d.total) * 100 : 0}%` } })),
+      h('div', { class: 'hint' }, d.total ? `${d.done} / ${d.total} files` : 'Preparing…'));
+  }
+
+  /** Steps of a deployment. Deployments recorded before steps existed get a best-effort reconstruction. */
+  function depSteps(d) {
+    if (Array.isArray(d.steps) && d.steps.length) return d.steps;
+    return [
+      { key: 'fetch', label: 'Fetch', status: d.trigger === 'manual-scoped' && !d.to ? 'skipped' : 'done' },
+      { key: 'plan', label: 'Plan', status: 'done' },
+      { key: 'upload', label: 'Upload', status: d.status === 'running' ? 'running' : d.status === 'failed' ? 'failed' : d.total ? 'done' : 'skipped' },
+      { key: 'command', label: 'Post-deploy', status: d.commandExit !== undefined && d.commandExit !== null ? (d.status === 'warning' ? 'failed' : 'done') : d.status === 'warning' ? 'failed' : 'skipped' },
+    ];
+  }
+
+  function pipelineView(d) {
+    const ic = { done: 'check', failed: 'x', running: 'loader', skipped: 'minus', pending: 'circle' };
+    const steps = depSteps(d);
+    const out = h('ol', { class: 'pipeline', 'aria-label': 'Deployment steps' });
+    steps.forEach((s, i) => {
+      const dur = s.startedAt && (s.finishedAt || s.status === 'running') ? fmtDuration(s.startedAt, s.finishedAt) : '';
+      if (i) out.append(h('li', { class: `pl-line ${steps[i - 1].status}`, 'aria-hidden': 'true' }));
+      out.append(h('li', { class: `pl-step ${s.status}`, title: `${s.label}: ${s.status}` },
+        h('span', { class: 'pl-ic' }, icon(ic[s.status] || 'circle', s.status === 'running' ? 'spin' : '')),
+        h('span', { class: 'pl-text' }, h('b', null, s.label), h('span', null, s.status === 'skipped' ? 'skipped' : s.status === 'pending' ? 'waiting' : s.status === 'failed' ? `failed${dur ? ' · ' + dur : ''}` : dur || (s.status === 'running' ? 'running' : 'done')))));
+    });
+    return out;
   }
 
   function repoCard(r) {
     const running = S.deployments.find((d) => d.repoId === r.id && d.status === 'running');
     const pending = r.lastRemoteSha && r.lastDeployedSha && r.lastRemoteSha !== r.lastDeployedSha;
-    const enabledSwitch = h('label', { class: 'switch', title: r.enabled ? 'Auto-deploy on' : 'Auto-deploy paused' },
-      h('input', { type: 'checkbox', checked: r.enabled, onchange: async (e) => { try { await api('PUT', `/api/repos/${r.id}`, { enabled: e.target.checked }); } catch (err) { toast('error', 'Update failed', err.message); } } }), h('span'));
+    const c = conn(r.connectionId);
+    const enabledSwitch = h('label', { class: 'switch', title: r.enabled ? 'Automatic deploys on' : 'Automatic deploys paused' },
+      h('input', { type: 'checkbox', checked: r.enabled, 'aria-label': 'Automatic deploys', onchange: async (e) => { try { await api('PUT', `/api/repos/${r.id}`, { enabled: e.target.checked }); } catch (err) { toast('error', 'Update failed', err.message); } } }), h('span'));
     return h('div', { class: 'card repo-card' },
       h('div', { class: 'card-head' },
         h('div', { class: 'repo-icon' }, icon('git')),
@@ -1560,38 +1917,34 @@
         enabledSwitch),
       h('div', { class: 'kv' },
         h('div', { class: 'k' }, 'Branch'), h('div', { class: 'v' }, h('span', { class: 'chip' }, icon('git'), r.branch)),
-        h('div', { class: 'k' }, 'Server'), h('div', { class: 'v' }, connName(r.connectionId)),
+        h('div', { class: 'k' }, 'Server'), h('div', { class: 'v' }, connName(r.connectionId), ' ', envTag(c, 'sm')),
         h('div', { class: 'k' }, 'Deployed'), h('div', { class: 'v' }, h('span', { class: 'chip' }, short(r.lastDeployedSha)), ' ', h('span', { class: 'hint' }, r.lastDeployedAt ? timeAgo(r.lastDeployedAt) : r.lastDeployedSha ? 'baseline' : 'not yet')),
         pending ? [h('div', { class: 'k' }, 'Remote head'), h('div', { class: 'v' }, h('span', { class: 'chip' }, short(r.lastRemoteSha)), ' ', h('span', { class: 'hint' }, 'not deployed yet'))] : null,
         h('div', { class: 'k' }, 'Last check'), h('div', { class: 'v hint' }, `${timeAgo(r.lastCheckedAt)} · every ${r.pollSec}s${r.localPath ? ' + push hook' : ''}`)),
       h('div', { class: 'mappings' }, r.mappings.map((m) => h('div', { class: 'mapping', title: m.deleteRemoved ? 'Files deleted at the source are deleted on the server' : 'Deletions are not synced' },
-        icon(isLocalMap(m) ? 'server' : 'git'), h('span', { title: isLocalMap(m) ? 'Folder on this computer (not from git)' : 'Folder in the repository' }, mappingSource(m)), icon('arrow-right'), h('span', null, m.remote),
+        icon(isLocalMap(m) ? 'laptop' : 'git'), h('span', { title: isLocalMap(m) ? 'Folder on this computer (not from git)' : 'Folder in the repository' }, mappingSource(m)), icon('arrow-right'), h('span', null, m.remote),
         isLocalMap(m) ? h('span', { class: 'badge info' }, 'local folder') : null,
         h('span', { class: 'grow' }),
         !m.deleteRemoved ? h('span', { class: 'badge' }, 'keep deleted') : null,
-        h('button', { class: 'btn sm map-sync', type: 'button', title: 'Upload this folder (or one of its sub-folders) now', disabled: !!running, onclick: () => openSyncDialog(r, { mappingId: m.id }) }, icon('upload'), 'Sync')))),
-      running ? h('div', { style: { padding: '6px 18px 4px' } },
-        h('div', { class: `progress ${running.total ? '' : 'indet'}` }, h('div', { style: { width: `${running.total ? (running.done / running.total) * 100 : 0}%` } })),
-        h('div', { class: 'hint', style: { marginTop: '6px' } }, running.total ? `${running.done} / ${running.total} files` : 'Preparing…')) : null,
+        h('button', { class: 'btn sm map-sync', type: 'button', title: 'Upload this folder (or some of its sub-folders) now', disabled: !!running, onclick: () => openSyncDialog(r, { mappingId: m.id }) }, icon('upload'), 'Upload')))),
       r.lastError && r.status === 'error' ? h('div', { class: 'repo-error' }, icon('alert'), h('div', null, r.lastError)) : null,
       h('div', { class: 'repo-foot' },
-        btn('Sync changes', 'play', () => syncRepo(r, false), 'sm primary', { disabled: !!running, title: 'Upload what changed since the last deployed commit' }),
-        btn('Sync files…', 'upload', () => openSyncDialog(r), 'sm', { disabled: !!running, title: 'Upload all files of every mapping, one mapping, or a sub-folder' }),
-        btn('History', 'history', () => { const d = S.deployments.find((x) => x.repoId === r.id); d ? openDeployLog(d.id) : toast('info', 'No deployments yet'); }, 'sm ghost'),
+        btn('Deploy', 'play', () => syncRepo(r, false), 'sm primary', { disabled: !!running, title: 'Check for new commits and deploy what changed since the last deploy' }),
+        btn('Upload folders…', 'upload', () => openSyncDialog(r), 'sm', { disabled: !!running, title: 'Upload every file of all mappings, one mapping, or some sub-folders' }),
         h('span', { class: 'grow' }),
-        ibtn('edit', 'Edit', () => openRepoForm(r), 'sm'),
-        ibtn('more', 'More', (e) => repoMenu(r, e.clientX, e.clientY), 'sm')));
+        ibtn('edit', 'Edit repository', () => openRepoForm(r), 'sm'),
+        ibtn('more', 'More actions', (e) => repoMenu(r, e.clientX, e.clientY), 'sm')));
   }
 
   // ---------------------------------------------------------------- scoped sync dialog
   const looksAbsoluteLocal = (p) => /^[A-Za-z]:[\\/]/.test(String(p || '')) || /^\\\\/.test(String(p || ''));
   const isLocalMap = (m) => m && (m.source === 'local' || (!m.source && looksAbsoluteLocal(m.local)));
   const mappingSource = (m) => (isLocalMap(m) ? m.local : m.local ? m.local + '/' : '(repo root)/');
-  const mappingLabel = (m) => `${isLocalMap(m) ? '💻 ' : ''}${mappingSource(m)} → ${m.remote}`;
+  const mappingLabel = (m) => `${mappingSource(m)} → ${m.remote}${isLocalMap(m) ? '   (local folder)' : ''}`;
 
   function openSyncDialog(r, { mappingId = '' } = {}) {
     const select = h('select', { class: 'select' },
-      h('option', { value: '' }, `All mappings (${r.mappings.length}) — every file`),
+      h('option', { value: '' }, `Everything — all ${r.mappings.length} mapping${r.mappings.length === 1 ? '' : 's'}`),
       r.mappings.map((m) => h('option', { value: m.id }, mappingLabel(m))));
     select.value = mappingId || '';
     // Selected sub-folders (relative to the mapping folder). Empty = the whole mapping.
@@ -1616,7 +1969,19 @@
       const picked = await pickRepoFolders(r, m, subs);
       if (picked !== null) { subs = []; addSubs(picked); }
     }, 'sm');
-    const mirror = h('input', { type: 'checkbox' });
+    // Update = upload and overwrite; Mirror = also delete server files missing from the source.
+    let mirrorOn = false;
+    const modeSeg = h('div', { class: 'seg mode-seg', role: 'radiogroup', 'aria-label': 'Upload mode' });
+    const modeHint = h('div', { class: 'hint' });
+    const renderMode = () => {
+      setKids(modeSeg,
+        h('button', { type: 'button', role: 'radio', 'aria-checked': String(!mirrorOn), class: mirrorOn ? '' : 'active', onclick: () => { mirror.checked = false; invalidate(); } }, icon('upload'), 'Update'),
+        h('button', { type: 'button', role: 'radio', 'aria-checked': String(mirrorOn), class: mirrorOn ? 'active danger' : '', onclick: () => { mirror.checked = true; invalidate(); } }, icon('alert'), 'Mirror'));
+      modeHint.textContent = mirrorOn
+        ? 'Uploads every file, then deletes server files that are not in the source — only inside the uploaded folders. Files matching the exclude patterns are never deleted. You confirm the list first.'
+        : 'Uploads every file and overwrites the server copies. Nothing is deleted on the server.';
+    };
+    const mirror = { get checked() { return mirrorOn; }, set checked(v) { mirrorOn = !!v; renderMode(); } };
     const runCmd = h('input', { type: 'checkbox' });
     const out = h('div');
     let preview = null;
@@ -1630,6 +1995,7 @@
       preview = null;
       previewKey = null;
       setKids(out);
+      setAction();
       const m = r.mappings.find((x) => x.id === select.value);
       if (select.value !== lastSel) {
         if (lastSel !== null) subs = []; // sub-folders belong to one mapping
@@ -1656,13 +2022,12 @@
           : `Uploads ${src || '(repo root)'}/… → ${dst}/`;
     };
     select.addEventListener('change', invalidate);
-    mirror.addEventListener('change', invalidate);
     runCmd.addEventListener('change', invalidate);
 
     const renderPreview = (p) => {
       const list = [
         ...p.uploads.map((o) => h('div', { class: 'l' }, h('span', { class: 'success' }, '↑ '), o.remote, h('span', { class: 't', style: { marginLeft: '8px' } }, fmtSize(o.size)))),
-        ...p.deletes.map((o) => h('div', { class: 'l' }, h('span', { class: 'error' }, '✕ '), o.remote)),
+        ...p.deletes.map((o) => h('div', { class: 'l' }, h('span', { class: 'error' }, '− '), o.remote)),
       ];
       setKids(out, h('div', { class: 'stack', style: { gap: '10px' } },
         h('div', { class: `callout ${p.deleteCount ? 'err' : 'ok'}` }, icon(p.deleteCount ? 'alert' : 'check-circle'), h('div', null,
@@ -1674,7 +2039,8 @@
     };
 
     const runPreview = async () => {
-      previewBtn.disabled = true;
+      busy.reading = true;
+      setAction();
       setKids(out, h('div', { class: 'callout' }, icon('loader', 'spin'), mirror.checked ? 'Reading the source and listing the server folder…' : 'Reading the source…'));
       try {
         const k = key();
@@ -1686,7 +2052,7 @@
       } catch (e) {
         setKids(out, h('div', { class: 'callout err' }, icon('x-circle'), e.message));
         return null;
-      } finally { previewBtn.disabled = false; }
+      } finally { busy.reading = false; setAction(); }
     };
 
     const runSync = async () => {
@@ -1694,12 +2060,14 @@
       if (mirror.checked) {
         const p = preview && previewKey === key() ? preview : await runPreview();
         if (!p) return;
+        const c = conn(r.connectionId);
         if (p.deleteCount && !(await confirmDialog({
-          title: `Delete ${p.deleteCount} file${p.deleteCount === 1 ? '' : 's'} on the server?`,
+          title: `Delete ${p.deleteCount} file${p.deleteCount === 1 ? '' : 's'} on ${c ? c.name : 'the server'}?`,
           message: h('div', null,
-            h('p', { style: { marginTop: 0 } }, 'Mirror mode deletes server files in the synced folders that are not in the source. Files matching your exclude patterns are kept.'),
-            h('div', { class: 'console', style: { maxHeight: '180px' } }, p.deletes.slice(0, 200).map((o) => h('div', { class: 'l' }, h('span', { class: 'error' }, '✕ '), o.remote)))),
-          confirmText: 'Sync and delete', danger: true,
+            h('p', { style: { marginTop: 0 } }, 'Mirror mode deletes server files in the uploaded folders that are not in the source. Files matching your exclude patterns are kept.'),
+            h('div', { class: 'console', style: { maxHeight: '180px' } }, p.deletes.slice(0, 200).map((o) => h('div', { class: 'l' }, h('span', { class: 'error' }, '− '), o.remote)))),
+          confirmText: `Upload and delete ${p.deleteCount}`, danger: true,
+          typeToConfirm: isProd(c) ? c.name : r.name,
         }))) return;
       }
       syncBtn.disabled = true;
@@ -1707,33 +2075,49 @@
         const res = await api('POST', `/api/repos/${r.id}/sync-scope`, params());
         m.close();
         const mm = r.mappings.find((x) => x.id === select.value);
-        toast('info', 'Sync started', mm ? `${mappingLabel(mm)}${subs.length ? ` (${subs.length} sub-folder${subs.length > 1 ? 's' : ''})` : ''}` : 'All mappings');
+        toast('info', 'Upload started', mm ? `${mappingLabel(mm)}${subs.length ? ` (${subs.length} sub-folder${subs.length > 1 ? 's' : ''})` : ''}` : 'All mappings');
         openDeployLog(res.deploymentId);
       } catch (e) {
-        toast('error', 'Sync failed to start', e.message);
-      } finally { syncBtn.disabled = false; }
+        toast('error', 'Upload failed to start', e.message);
+      } finally { syncBtn.disabled = false; setAction(); }
     };
 
-    const previewBtn = btn('Preview', 'eye', async () => {
+    // One primary button, two steps: "Preview changes" first, then it states exactly what will happen.
+    const busy = { reading: false };
+    const syncBtn = btn('Preview changes', 'eye', async () => {
       if (subInput.value.trim()) { addSubs(subInput.value.split(/[,;\n]/)); subInput.value = ''; }
-      runPreview();
-    });
-    const syncBtn = btn('Sync now', 'upload', runSync, 'primary');
+      if (preview && previewKey === key()) runSync();
+      else runPreview();
+    }, 'primary');
+    function setAction() {
+      const ready = preview && previewKey === key();
+      const dels = ready && mirror.checked ? preview.deleteCount : 0;
+      const ups = ready ? preview.uploadCount : 0;
+      let label;
+      let ic = 'upload';
+      if (busy.reading) { label = 'Reading files…'; ic = 'loader'; }
+      else if (!ready) { label = 'Preview changes'; ic = 'eye'; }
+      else if (!ups && !dels) label = 'Nothing to upload';
+      else label = [ups ? `Upload ${ups} file${ups === 1 ? '' : 's'} · ${fmtSize(preview.uploadBytes)}` : null, dels ? `delete ${dels}` : null].filter(Boolean).join(', ');
+      setKids(syncBtn, icon(ic, ic === 'loader' ? 'spin' : ''), label);
+      syncBtn.disabled = busy.reading || (ready && !ups && !dels);
+      syncBtn.className = `btn ${dels ? 'danger solid' : 'primary'}`;
+    }
     const m = modal({
-      title: `Sync files — ${r.name}`, iconName: 'upload', size: 'wide',
+      title: `Upload folders — ${r.name}`, iconName: 'upload', size: 'wide',
       body: h('div', { class: 'stack' },
         syncInfo,
-        h('div', { class: 'field' }, h('label', null, 'What to sync'), select),
+        h('div', { class: 'field' }, h('label', null, 'What to upload'), select),
         h('div', { class: 'field' }, h('label', null, 'Only these sub-folders (optional — pick one or several)'),
           chips,
           h('div', { class: 'row' }, subInput, addBtn, browse),
           subHint),
-        h('label', { class: 'check' }, mirror, h('span', null, 'Replace the server folder (mirror): also delete server files that are not in the source',
-          h('div', { class: 'hint' }, 'Only inside the synced folders. Files matching the exclude patterns (e.g. vendor/, uploads/, .env) are never deleted. You will see the list before anything is deleted.'))),
+        h('div', { class: 'field' }, h('label', null, 'Mode'), modeSeg, modeHint),
         r.postDeployCommand ? h('label', { class: 'check' }, runCmd, h('span', null, 'Run the post-deploy command afterwards', h('div', { class: 'hint mono' }, r.postDeployCommand))) : null,
         out),
-      foot: [h('div', { class: 'left' }, previewBtn), btn('Cancel', null, () => m.close()), syncBtn],
+      foot: [btn('Cancel', null, () => m.close()), syncBtn],
     });
+    renderMode();
     invalidate();
   }
 
@@ -1809,8 +2193,8 @@
 
   function repoMenu(r, x, y) {
     showMenu(x, y, [
-      { label: 'Sync changes', icon: 'play', action: () => syncRepo(r, false) },
-      { label: 'Sync files…', icon: 'upload', action: () => openSyncDialog(r) },
+      { label: 'Deploy', icon: 'play', action: () => syncRepo(r, false) },
+      { label: 'Upload folders…', icon: 'upload', action: () => openSyncDialog(r) },
       { label: 'Redeploy all files', icon: 'rocket', action: () => syncRepo(r, true) },
       { label: 'Mark remote head as deployed', icon: 'check', action: () => markDeployed(r) },
       '-',
@@ -1827,10 +2211,10 @@
     try {
       await api('POST', `/api/repos/${r.id}/sync`, { full });
       toast('info', full ? 'Full redeploy started' : 'Checking for new commits…', r.name);
-    } catch (e) { toast('error', 'Sync failed', e.message); }
+    } catch (e) { toast('error', 'Deploy failed', e.message); }
   }
 
-  function checkAll() { S.repos.forEach((r) => api('POST', `/api/repos/${r.id}/sync`, {}).catch(() => {})); toast('info', 'Checking all repositories…'); }
+  function checkAll() { S.repos.forEach((r) => api('POST', `/api/repos/${r.id}/sync`, {}).catch(() => {})); toast('info', 'Checking every repository for pushes…'); }
 
   async function markDeployed(r) {
     if (!(await confirmDialog({ title: 'Mark as deployed?', message: 'The current remote head will be recorded as deployed without uploading anything. Only later pushes will be synced.', confirmText: 'Mark deployed' }))) return;
@@ -1849,32 +2233,136 @@
     try { await api('DELETE', `/api/repos/${r.id}`); toast('success', 'Repository removed'); } catch (e) { toast('error', 'Failed', e.message); }
   }
 
+  // ---------------------------------------------------------------- deployment log viewer
+  const LOG_SECTIONS = { fetch: 'Fetch', plan: 'Plan', upload: 'Upload', command: 'Post-deploy', '': 'Summary' };
+  const isFileLine = (en) => en.level === 'success' && /^(Uploaded|Deleted) /.test(en.message);
+
   async function openDeployLog(depId) {
-    const con = h('div', { class: 'console' }, h('div', { class: 'l' }, 'Loading…'));
+    let dep = null;
+    let entries = [];
+    let filter = 'all';
+    let search = '';
+    let relTime = LS.get('logRelTime', true);
+    const open = new Set(); // expanded runs of "Uploaded …" lines
     const headInfo = h('div');
-    const line = (en) => h('div', { class: 'l' }, h('span', { class: 't' }, new Date(en.ts).toLocaleTimeString()), h('span', { class: en.level }, en.message));
+    const stepsHost = h('div');
+    const con = h('div', { class: 'console log-console', role: 'log', 'aria-live': 'polite' }, h('div', { class: 'l' }, 'Loading…'));
+
+    const stamp = (en) => {
+      if (!relTime || !dep) return new Date(en.ts).toLocaleTimeString();
+      const s = (Date.parse(en.ts) - Date.parse(dep.startedAt)) / 1000;
+      return `+${s < 10 ? s.toFixed(2) : s.toFixed(1)}s`;
+    };
+    const line = (en) => h('div', { class: 'l' }, h('span', { class: 't', title: new Date(en.ts).toLocaleString() }, stamp(en)), h('span', { class: en.level }, en.message));
+    const matches = (en) => (filter === 'all' || (filter === 'error' ? en.level === 'error' : en.level === 'error' || en.level === 'warn'))
+      && (!search || en.message.toLowerCase().includes(search));
+
+    const renderBody = () => {
+      const stick = con.scrollTop + con.clientHeight >= con.scrollHeight - 30;
+      const shown = entries.filter(matches);
+      const flat = filter !== 'all' || search;
+      const phased = entries.some((en) => en.phase);
+      const out = [];
+      if (!shown.length) out.push(h('div', { class: 'l t' }, entries.length ? 'No lines match.' : 'No output yet.'));
+      else if (flat || !phased) {
+        // Filtering or an older log without steps: plain list, long runs of file lines folded.
+        pushRuns(out, shown, 'all');
+      } else {
+        const order = ['fetch', 'plan', 'upload', 'command', ''];
+        for (const key of order) {
+          const sec = shown.filter((en) => (en.phase || '') === key);
+          if (!sec.length) continue;
+          const errs = sec.filter((en) => en.level === 'error').length;
+          const step = dep && depSteps(dep).find((s) => s.key === key);
+          out.push(h('div', { class: `log-sec ${step ? step.status : ''}` },
+            h('b', null, LOG_SECTIONS[key]),
+            step && step.startedAt && step.finishedAt ? h('span', null, fmtDuration(step.startedAt, step.finishedAt)) : null,
+            errs ? h('span', { class: 'error' }, `${errs} error${errs === 1 ? '' : 's'}`) : null));
+          pushRuns(out, sec, key);
+        }
+      }
+      setKids(con, out);
+      if (stick) con.scrollTop = con.scrollHeight;
+    };
+
+    // Folds 4+ consecutive "Uploaded …"/"Deleted …" lines into one expandable row.
+    function pushRuns(out, list, sectionKey) {
+      for (let i = 0; i < list.length;) {
+        if (!isFileLine(list[i])) { out.push(line(list[i])); i++; continue; }
+        let j = i;
+        while (j < list.length && isFileLine(list[j])) j++;
+        const run = list.slice(i, j);
+        const runKey = `${sectionKey}:${run[0].ts}:${run[0].message}`;
+        if (run.length < 4 || open.has(runKey)) {
+          if (run.length >= 4) out.push(h('button', { type: 'button', class: 'l fold open', onclick: () => { open.delete(runKey); renderBody(); } }, icon('chevron-down'), `Hide ${run.length} file lines`));
+          run.forEach((en) => out.push(line(en)));
+        } else {
+          const ups = run.filter((en) => en.message.startsWith('Uploaded')).length;
+          const dels = run.length - ups;
+          out.push(h('button', { type: 'button', class: 'l fold', onclick: () => { open.add(runKey); renderBody(); } },
+            icon('chevron-right'), h('span', { class: 't' }, stamp(run[0])),
+            h('span', { class: 'success' }, [ups ? `${ups} file${ups === 1 ? '' : 's'} uploaded` : null, dels ? `${dels} deleted` : null].filter(Boolean).join(', ')),
+            h('span', { class: 't' }, ' — show')));
+        }
+        i = j;
+      }
+    }
+
+    let raf = 0;
+    const scheduleBody = () => { if (!raf) raf = requestAnimationFrame(() => { raf = 0; renderBody(); }); };
+
+    const renderHead = (dd) => {
+      dep = dd;
+      setKids(headInfo, h('div', { class: 'row wrap' },
+        depStatusBadge(dd), h('b', null, dd.repoName),
+        dd.to ? h('span', { class: 'chip' }, short(dd.to)) : null,
+        dd.commit ? h('span', { class: 'hint' }, `${dd.commit.message} — ${dd.commit.author}`) : null,
+        h('span', { class: 'grow' }),
+        h('span', { class: 'hint', title: new Date(dd.startedAt).toLocaleString() }, `${triggerLabel(dd.trigger)} · ${timeAgo(dd.startedAt)}${dd.finishedAt ? ` · ${fmtDuration(dd.startedAt, dd.finishedAt)}` : ''}`)));
+      setKids(stepsHost, pipelineView(dd), dd.status === 'running' ? deployProgress(dd) : null);
+    };
+
+    const seg = h('div', { class: 'seg' });
+    const renderSeg = () => setKids(seg, [['all', 'All'], ['warn', 'Warnings'], ['error', 'Errors']].map(([k, l]) =>
+      h('button', { type: 'button', class: filter === k ? 'active' : '', onclick: () => { filter = k; renderSeg(); renderBody(); } }, l)));
+    renderSeg();
+    const searchInput = h('input', { class: 'input', placeholder: 'Search the log…', 'aria-label': 'Search the log', oninput: (e) => { search = e.target.value.trim().toLowerCase(); renderBody(); } });
+    const relBox = h('input', { type: 'checkbox', checked: relTime, onchange: (e) => { relTime = e.target.checked; LS.set('logRelTime', relTime); renderBody(); } });
+    const plainText = () => entries.map((en) => `${en.ts} ${en.level.toUpperCase().padEnd(7)} ${en.phase ? `[${en.phase}] ` : ''}${en.message}`).join('\n');
+    const downloadLog = () => {
+      const blob = new Blob([plainText() + '\n'], { type: 'text/plain' });
+      const a = h('a', { href: URL.createObjectURL(blob), download: `deploy-${(dep && dep.repoName) || 'log'}-${dep && dep.to ? short(dep.to) : depId}.log` });
+      document.body.append(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+    };
+
     const m = modal({
       title: 'Deployment log', iconName: 'terminal', size: 'xwide',
-      body: h('div', { class: 'stack' }, headInfo, con),
-      foot: [btn('Copy log', 'copy', () => copyText(con.innerText)), btn('Close', null, () => m.close())],
+      body: h('div', { class: 'stack' }, headInfo, stepsHost,
+        h('div', { class: 'row wrap log-tools' }, seg, h('div', { class: 'search' }, icon('search'), searchInput),
+          h('label', { class: 'check', style: { alignItems: 'center' } }, relBox, h('span', null, 'Time since start'))),
+        con),
+      foot: [h('div', { class: 'left' }, btn('Download .log', 'download', downloadLog, 'sm ghost')), btn('Copy log', 'copy', () => copyText(plainText())), btn('Close', null, () => m.close())],
       onClose: () => S.logSubs.delete(depId),
     });
     try {
       const d = await api('GET', `/api/deployments/${depId}`);
-      const renderHead = (dd) => setKids(headInfo, h('div', { class: 'row wrap' }, depStatusBadge(dd), h('b', null, dd.repoName), h('span', { class: 'chip' }, short(dd.to)), dd.commit ? h('span', { class: 'hint' }, `${dd.commit.message} — ${dd.commit.author}`) : null, h('span', { class: 'grow' }), h('span', { class: 'hint' }, `${triggerLabel(dd.trigger)} · ${new Date(dd.startedAt).toLocaleString()}`)));
+      entries = d.log || [];
       renderHead(d);
-      setKids(con, ...d.log.map(line));
+      renderBody();
       con.scrollTop = con.scrollHeight;
       S.logSubs.set(depId, {
-        line: (en) => { const stick = con.scrollTop + con.clientHeight >= con.scrollHeight - 30; con.append(line(en)); if (stick) con.scrollTop = con.scrollHeight; },
-        head: renderHead,
+        line: (en) => { entries.push(en); scheduleBody(); },
+        head: (dd) => { renderHead(dd); scheduleBody(); },
       });
     } catch (e) { setKids(con, h('div', { class: 'l error' }, e.message)); }
   }
 
   // ---------------------------------------------------------------- repo form
   function openRepoForm(existing) {
-    if (!S.connections.length) { toast('warn', 'Add an FTP connection first'); openConnectionForm(); return; }
+    if (!S.connections.length) { toast('warn', 'Add a server connection first'); openConnectionForm(); return; }
     const isEdit = !!existing;
     const e = existing || { branch: 'main', pollSec: S.settings.defaultPollSec || 60, enabled: true, mappings: [{ local: '', remote: ((conn(S.activeConn) || S.connections[0]).remoteRoot || '/'), deleteRemoved: true }], excludes: ['.github/', '.gitignore', '.gitattributes'] };
     const branchList = h('datalist', { id: `br_${uid()}` });
@@ -1886,7 +2374,7 @@
       localPath: h('input', { class: 'input mono', value: e.localPath || '', placeholder: '(optional) D:\\Projects\\my-site', spellcheck: 'false' }),
       gitUser: h('input', { class: 'input mono', value: e.gitUser || '', placeholder: 'x-access-token', autocomplete: 'off' }),
       token: h('input', { class: 'input mono', type: 'password', placeholder: e.hasToken ? '•••••••• (saved — leave empty to keep)' : 'ghp_… (only for private HTTPS repos)', autocomplete: 'new-password' }),
-      connectionId: h('select', { class: 'select' }, S.connections.map((c) => h('option', { value: c.id }, `${c.name} — ${protoLabel(c)} ${c.host}`))),
+      connectionId: h('select', { class: 'select' }, S.connections.map((c) => h('option', { value: c.id }, `${c.name} — ${protoLabel(c)} ${c.host}${envOf(c) ? ` · ${envOf(c).label}` : ''}`))),
       excludes: h('textarea', { class: 'textarea', rows: 3, value: (e.excludes || []).join('\n'), placeholder: 'node_modules/\n*.map\n.env' }),
       pollSec: h('input', { class: 'input', type: 'number', min: 10, value: e.pollSec || 60 }),
       enabled: h('input', { type: 'checkbox', checked: e.enabled !== false }),
@@ -2023,7 +2511,7 @@
           h('div', { class: 'field' }, h('label', null, 'Remote watched (where you push)'), f.url),
           h('div', { class: 'field' }, h('label', null, 'Local folder (for push hook)'), f.localPath)),
         details,
-        h('div', { class: 'field' }, h('label', null, 'Deploy to connection (FTP, FTPS or SFTP)'), f.connectionId),
+        h('div', { class: 'field' }, h('label', null, 'Deploy to server'), f.connectionId),
         h('div', { class: 'field' }, h('label', null, 'Folder mappings — source folder → server folder'), mapHost),
         h('div', { class: 'grid-2' },
           h('div', { class: 'field' }, h('label', null, 'Exclude (one pattern per line)'), f.excludes, h('div', { class: 'hint' }, 'Glob patterns: node_modules/, *.map, src/**/*.test.js')),
@@ -2113,14 +2601,14 @@
     };
     setKids(ct, h('div', { class: 'stack', style: { maxWidth: '760px' } },
       h('div', { class: 'card' },
-        h('div', { class: 'card-head' }, icon('clock'), h('h3', null, 'FTP session')),
+        h('div', { class: 'card-head' }, icon('clock'), h('h3', null, 'Server sessions')),
         h('div', { class: 'card-body stack' },
           h('div', { class: 'grid-2' },
             h('div', { class: 'field' }, h('label', null, 'Disconnect after inactivity (minutes)'), idle),
             h('div', { class: 'field' }, h('label', null, 'Keep-alive NOOP while active (seconds)'), keep)),
-          h('div', { class: 'callout' }, icon('info'), h('div', null, 'The app session never expires and you never re-enter credentials. After the idle time the FTP socket is closed to free the server; the next action reconnects silently with the saved, encrypted credentials.')))),
+          h('div', { class: 'callout' }, icon('info'), h('div', null, 'The app session never expires and you never re-enter credentials. After the idle time the connection is closed to free the server; the next action reconnects silently with the saved, encrypted credentials.')))),
       h('div', { class: 'card' },
-        h('div', { class: 'card-head' }, icon('git'), h('h3', null, 'Git deploy')),
+        h('div', { class: 'card-head' }, icon('git'), h('h3', null, 'Deployments')),
         h('div', { class: 'card-body stack' },
           h('div', { class: 'field' }, h('label', null, 'Default polling interval for new repositories (seconds)'), poll),
           h('div', { class: 'hint' }, 'Polling uses "git ls-remote", which is very light. With the pre-push hook installed, deploys start within seconds of a push.'))),
@@ -2137,6 +2625,128 @@
           h('div', { class: 'k' }, 'Data folder'), h('div', { class: 'v mono', title: S.dataDir }, S.dataDir),
           h('div', { class: 'k' }, 'Connections'), h('div', { class: 'v' }, S.connections.length),
           h('div', { class: 'k' }, 'Repositories'), h('div', { class: 'v' }, S.repos.length)))));
+  }
+
+  // ================================================================ activity center
+  // One place for everything in flight: deployments and transfers, plus recent results and errors.
+  function runningOps() {
+    return [
+      ...S.deployments.filter((d) => d.status === 'running'),
+      ...S.transfers.filter((j) => j.status === 'running'),
+    ];
+  }
+
+  let acEl = null;
+  function closeActivityCenter() { if (acEl) { acEl.remove(); acEl = null; } }
+  function toggleActivityCenter(anchor) {
+    if (acEl) { closeActivityCenter(); return; }
+    acEl = h('div', { class: 'popover activity-center', role: 'dialog', 'aria-label': 'Activity center' });
+    document.body.append(acEl);
+    const r = anchor.getBoundingClientRect();
+    acEl.style.left = `${Math.max(8, r.left - 12)}px`;
+    acEl.style.bottom = `${innerHeight - r.top + 8}px`;
+    renderActivityCenter();
+  }
+  document.addEventListener('mousedown', (e) => { if (acEl && !acEl.contains(e.target) && !e.target.closest('#bellBtn')) closeActivityCenter(); });
+
+  function renderActivityCenter() {
+    if (!acEl) return;
+    const runDeps = S.deployments.filter((d) => d.status === 'running');
+    const runTr = S.transfers.filter((j) => j.status === 'running');
+    const doneDeps = S.deployments.filter((d) => d.status !== 'running').slice(0, 5);
+    const doneTr = S.transfers.filter((j) => j.status !== 'running').slice(0, 3);
+    const errors = S.activity.filter((a) => a.level === 'error' && Date.now() - Date.parse(a.ts) < 86400000).slice(0, 3);
+    const trPct = (j) => (j.total ? Math.round(((j.phase === 'sending' ? j.sent : j.ftp) / j.total) * 100) : 0);
+    const depRow = (d) => h('button', { type: 'button', class: 'ac-row', onclick: () => { closeActivityCenter(); openDeployLog(d.id); } },
+      depStatusBadge(d), h('span', { class: 'grow ac-name' }, d.repoName, d.commit ? h('span', { class: 'hint' }, ` · ${d.commit.message}`) : null),
+      h('span', { class: 'hint' }, d.status === 'running' ? `${d.done}/${d.total || '…'}` : timeAgo(d.startedAt)));
+    const trRow = (j) => h('div', { class: 'ac-row' },
+      j.status === 'running' ? icon('loader', 'spin') : icon(j.status === 'done' ? 'check-circle' : 'x-circle', j.status === 'done' ? 'ok' : 'bad'),
+      h('span', { class: 'grow ac-name' }, `${j.dir === 'down' ? 'Download' : 'Upload'} · ${j.label}`),
+      h('span', { class: 'hint' }, j.status === 'running' ? `${trPct(j)}%` : j.status === 'done' ? `${j.ok} file${j.ok === 1 ? '' : 's'}` : `${j.failures.length} failed`));
+    const section = (title, rows) => (rows.length ? [h('div', { class: 'ac-title' }, title), ...rows] : []);
+    const running = [...runDeps.map(depRow), ...runTr.map(trRow)];
+    setKids(acEl,
+      h('div', { class: 'ac-head' }, h('b', null, 'Activity'), h('span', { class: 'grow' }),
+        btn('Open log', 'activity', () => { closeActivityCenter(); setView('activity'); }, 'sm ghost')),
+      h('div', { class: 'ac-body' },
+        section('Running', running),
+        section('Recent deployments', doneDeps.map(depRow)),
+        section('Recent transfers', doneTr.map(trRow)),
+        section('Errors (24h)', errors.map((a) => h('div', { class: 'ac-row err' }, icon('x-circle', 'bad'), h('span', { class: 'grow ac-name', title: a.message }, a.message), h('span', { class: 'hint' }, timeAgo(a.ts))))),
+        !running.length && !doneDeps.length && !doneTr.length && !errors.length ? h('div', { class: 'hint', style: { padding: '18px 14px' } }, 'Nothing yet. Deploys and transfers show up here.') : null));
+  }
+
+  // ================================================================ command palette (Ctrl+K)
+  function paletteItems(query) {
+    const items = [];
+    const add = (group, label, iconName, run, extra = {}) => items.push({ group, label, icon: iconName, run, ...extra });
+    for (const v of VIEWS) add('Go to', v.label, v.icon, () => setView(v.id));
+    for (const c of S.connections) add('Servers', `Open ${c.name}`, isSftpConn(c) ? 'terminal' : 'server', () => openConnection(c.id), { hint: `${c.user ? c.user + '@' : ''}${c.host}`, env: c });
+    for (const r of S.repos) {
+      add('Deploy', `Deploy ${r.name}`, 'play', () => syncRepo(r, false), { hint: `${r.branch} → ${connName(r.connectionId)}` });
+      add('Deploy', `Upload folders of ${r.name}…`, 'upload', () => openSyncDialog(r));
+      const last = S.deployments.find((d) => d.repoId === r.id);
+      if (last) add('Deploy', `Latest log of ${r.name}`, 'terminal', () => openDeployLog(last.id), { hint: timeAgo(last.startedAt) });
+    }
+    const c = conn();
+    if (c && S.view === 'explorer') {
+      add('Explorer', 'Refresh folder', 'refresh', () => loadDir(S.ex.path), { kbd: 'F5' });
+      add('Explorer', 'New folder…', 'folder-plus', newFolder);
+      add('Explorer', 'Upload files…', 'upload', () => $('#filePicker').click());
+      add('Explorer', S.dual ? 'Hide local pane' : 'Show local pane', 'columns', toggleDual);
+      if (isSftpConn(c)) add('Explorer', 'Open terminal here', 'terminal', () => openTerminal(c.id, S.ex.path));
+    }
+    add('Actions', 'New connection…', 'plus', () => openConnectionForm());
+    add('Actions', 'Add repository…', 'git', () => openRepoForm());
+    if (S.repos.length) add('Actions', 'Check every repository for pushes', 'refresh', checkAll);
+    add('Actions', 'Toggle light / dark theme', 'sun', () => setTheme(document.documentElement.dataset.theme === 'light' ? 'dark' : 'light'));
+    const qy = query.trim();
+    if (c && /^[~/]/.test(qy)) items.unshift({ group: 'Explorer', label: `Go to ${qy} on ${c.name}`, icon: 'folder', run: () => { if (S.view !== 'explorer') setView('explorer'); navigate(qy); }, always: true });
+    const words = qy.toLowerCase().split(/\s+/).filter(Boolean);
+    return items.filter((it) => it.always || words.every((w) => `${it.group} ${it.label} ${it.hint || ''}`.toLowerCase().includes(w)));
+  }
+
+  let paletteEl = null;
+  function closePalette() { if (paletteEl) { paletteEl.remove(); paletteEl = null; } }
+  function openPalette() {
+    if (paletteEl) return;
+    closeMenu();
+    closeActivityCenter();
+    let active = 0;
+    let list = [];
+    const input = h('input', { class: 'palette-input', placeholder: 'Type a command, a server, a repository, or a path like ~/www', spellcheck: 'false', 'aria-label': 'Command', role: 'combobox', 'aria-expanded': 'true', 'aria-controls': 'paletteList' });
+    const listEl = h('div', { class: 'palette-list', id: 'paletteList', role: 'listbox' });
+    const close = closePalette;
+    const run = (it) => { close(); it.run(); };
+    const render = () => {
+      list = paletteItems(input.value);
+      active = Math.min(active, Math.max(0, list.length - 1));
+      let group = null;
+      const rows = [];
+      list.forEach((it, i) => {
+        if (it.group !== group) { group = it.group; rows.push(h('div', { class: 'palette-group' }, group)); }
+        const row = h('div', { class: `palette-item ${i === active ? 'active' : ''}`, role: 'option', 'aria-selected': i === active ? 'true' : 'false', onclick: () => run(it), onmousemove: () => { if (active !== i) { active = i; render(); } } },
+          icon(it.icon), h('span', { class: 'grow' }, it.label, it.hint ? h('span', { class: 'hint' }, `  ${it.hint}`) : null), it.env ? envTag(it.env, 'sm') : null, it.kbd ? h('kbd', null, it.kbd) : null);
+        rows.push(row);
+      });
+      setKids(listEl, rows.length ? rows : h('div', { class: 'palette-empty' }, 'No matching command'));
+      const a = listEl.querySelector('.palette-item.active');
+      a && a.scrollIntoView({ block: 'nearest' });
+    };
+    input.addEventListener('input', () => { active = 0; render(); });
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'ArrowDown') { e.preventDefault(); active = Math.min(list.length - 1, active + 1); render(); }
+      else if (e.key === 'ArrowUp') { e.preventDefault(); active = Math.max(0, active - 1); render(); }
+      else if (e.key === 'Enter') { e.preventDefault(); if (list[active]) run(list[active]); }
+      else if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); close(); }
+    });
+    paletteEl = h('div', { class: 'palette-backdrop', onmousedown: (e) => { if (e.target === paletteEl) close(); } },
+      h('div', { class: 'palette', role: 'dialog', 'aria-modal': 'true', 'aria-label': 'Command palette' },
+        h('div', { class: 'palette-search' }, icon('search'), input, h('kbd', null, 'Esc')), listEl));
+    document.body.append(paletteEl);
+    render();
+    input.focus();
   }
 
   // ================================================================ live events
@@ -2174,7 +2784,7 @@
       if (S.activity.length > 500) S.activity.length = 500;
       if (S.view === 'activity') { const ct = $('#content'); ct._renderList ? ct._renderList() : renderContent(); }
       if (a.level === 'error') renderNav();
-      if (a.scope === 'git' && a.level !== 'info' && a.deploymentId) toast(a.level, a.level === 'success' ? 'Deployed' : a.level === 'warn' ? 'Deployed — command failed' : 'Deployment failed', a.message);
+      if (a.scope === 'git' && a.level !== 'info' && a.deploymentId) toast(a.level, a.level === 'success' ? 'Deployed' : a.level === 'warn' ? 'Deployed — post-deploy command failed' : 'Deploy failed', a.message);
     });
     on('activity-cleared', () => { S.activity = []; if (S.view === 'activity') renderContent(); renderNav(); });
     on('repo', (r) => {
@@ -2190,6 +2800,8 @@
       const sub = S.logSubs.get(d.id);
       if (sub) sub.head(d);
       scheduleViewRender('deploy');
+      renderSideFooter();
+      renderActivityCenter();
       // A deploy just changed files on the server we're browsing: refresh the listing.
       if (d.status === 'success' && (d.uploaded || d.deleted) && d.connectionId === S.activeConn && S.view === 'explorer' && S.ex.path) loadDir(S.ex.path);
     });
@@ -2197,15 +2809,24 @@
     on('transfer', (t) => {
       const ref = S.transferByTid[t.tid];
       if (!ref) return;
-      if (t.phase === 'ftp') { ref.job.phase = 'ftp'; ref.job.ftp = ref.base + (t.bytes || 0); ref.job.current = t.name || ''; scheduleTransfers(); }
+      if (t.phase === 'ftp') {
+        ref.job.phase = 'ftp';
+        if (ref.job.dir && t.total) ref.job.total = t.total;
+        ref.job.ftp = ref.base + (t.bytes || 0);
+        ref.job.current = t.name || '';
+        scheduleTransfers();
+      }
     });
     on('settings', (s) => { S.settings = s; });
   }
 
   // ================================================================ keyboard
   document.addEventListener('keydown', (e) => {
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') { e.preventDefault(); if (!paletteEl) openPalette(); return; }
+    if (paletteEl) { if (e.key === 'Escape') closePalette(); return; }
     if (e.key === 'Escape') {
       if (openMenuEl) { closeMenu(); return; }
+      if (acEl) { closeActivityCenter(); return; }
       const top = modalStack[modalStack.length - 1];
       if (top) { top.close(); return; }
     }

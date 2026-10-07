@@ -715,6 +715,57 @@ async function startFtp() {
     assert(r && r.mappings[0].source === 'local', JSON.stringify(r && r.mappings));
     db.repos.splice(db.repos.indexOf(r), 1);
   });
+
+  console.log('Environment tags, deploy steps, local pane');
+  await step('connection environment tag is saved, validated and can be cleared', async () => {
+    let c = await api('PUT', `/api/connections/${hid}`, { env: 'production' });
+    assert(c.env === 'production', `env ${c.env}`);
+    c = await api('PUT', `/api/connections/${hid}`, { name: 'renamed' });
+    assert(c.env === 'production', 'env kept when not sent');
+    c = await api('PUT', `/api/connections/${hid}`, { env: 'bogus' });
+    assert(c.env === null, `bogus -> ${c.env}`);
+    c = await api('PUT', `/api/connections/${hid}`, { env: 'staging' });
+    c = await api('PUT', `/api/connections/${hid}`, { env: null });
+    assert(c.env === null, `cleared -> ${c.env}`);
+  });
+  await step('deployments record their steps and log lines carry the step', async () => {
+    const ok = db.deployments.find((d) => d.repoId === srid && d.status === 'success' && d.commandExit === 0);
+    assert(ok && Array.isArray(ok.steps), 'steps recorded');
+    assert(ok.steps.map((s) => `${s.key}:${s.status}`).join(',') === 'fetch:done,plan:done,upload:done,command:done', JSON.stringify(ok.steps));
+    assert(ok.log.some((l) => l.phase === 'upload' && l.message.startsWith('Uploaded')) && ok.log.some((l) => l.phase === 'command'), 'phases on log lines');
+    const warn = db.deployments.find((d) => d.repoId === srid && d.status === 'warning');
+    assert(warn && warn.steps.find((s) => s.key === 'command').status === 'failed', JSON.stringify(warn && warn.steps));
+    const local = db.deployments.find((d) => d.trigger === 'manual-scoped' && !d.to);
+    assert(local && local.steps.find((s) => s.key === 'fetch').status === 'skipped', 'local-only sync skips fetch');
+  });
+  const LOCAL_SRC = path.join(TMP, 'local-src');
+  fs.mkdirSync(path.join(LOCAL_SRC, 'sub'), { recursive: true });
+  fs.writeFileSync(path.join(LOCAL_SRC, 'a.txt'), 'alpha');
+  fs.writeFileSync(path.join(LOCAL_SRC, 'sub', 'b.txt'), 'bravo');
+  await step('local pane lists folders on this computer', async () => {
+    const l = await api('GET', `/api/local/list?path=${encodeURIComponent(LOCAL_SRC)}`);
+    assert(l.path === path.resolve(LOCAL_SRC) && l.entries[0].name === 'sub' && l.entries[0].type === 'dir', JSON.stringify(l.entries));
+    assert(l.entries.some((e) => e.name === 'a.txt' && e.size === 5) && l.parent && l.roots.length, 'files, parent, roots');
+    const home = await api('GET', '/api/local/list');
+    assert(home.path === path.resolve(os.homedir()), `default ${home.path}`);
+    const rel = await fetch(`${APP}/api/local/list?path=relative/folder`);
+    assert(rel.status === 400, `relative -> ${rel.status}`);
+  });
+  await step('upload-local sends files and whole folders from this computer', async () => {
+    const r = await api('POST', `/api/ftp/${hid}/upload-local`, { paths: [LOCAL_SRC, path.join(LOCAL_SRC, 'a.txt')], dest: '~/from-local', tid: 'ul1' });
+    assert(r.results.length === 3 && r.results.every((x) => x.ok) && r.total === 15, JSON.stringify(r));
+    assert(fs.readFileSync(H('from-local', 'local-src', 'sub', 'b.txt'), 'utf8') === 'bravo', 'nested file');
+    assert(fs.readFileSync(H('from-local', 'a.txt'), 'utf8') === 'alpha', 'single file');
+  });
+  await step('download-local copies server files and folders to this computer', async () => {
+    const dest = path.join(TMP, 'local-dl');
+    fs.mkdirSync(dest);
+    const r = await api('POST', `/api/ftp/${hid}/download-local`, { items: [{ path: '/home/shared/from-local/local-src', type: 'dir' }, { path: '/home/shared/from-local/a.txt', type: 'file', size: 5 }], dest, tid: 'dl1' });
+    assert(r.results.length === 3 && r.results.every((x) => x.ok), JSON.stringify(r));
+    assert(fs.readFileSync(path.join(dest, 'local-src', 'sub', 'b.txt'), 'utf8') === 'bravo' && fs.readFileSync(path.join(dest, 'a.txt'), 'utf8') === 'alpha', 'on disk');
+    const bad = await api('POST', `/api/ftp/${hid}/download-local`, { items: [{ path: '/home/shared/from-local/missing.txt', type: 'file' }], dest });
+    assert(!bad.results[0].ok && !fs.existsSync(path.join(dest, 'missing.txt')), 'failed download leaves no file');
+  });
   homeSrv.close();
 
   await step('version endpoint reports whether a restart is needed', async () => {
@@ -732,6 +783,13 @@ async function startFtp() {
       require('http').get({ host: '127.0.0.1', port: Number(process.env.PORT), path: '/api/state', headers: { Host: 'evil.example.com' } }, (res) => resolve(res.statusCode));
     });
     assert(r === 403, `status ${r}`);
+  });
+  await step('rejects requests from other web pages (Origin guard)', async () => {
+    const status = (origin) => new Promise((resolve) => {
+      require('http').get({ host: '127.0.0.1', port: Number(process.env.PORT), path: '/api/state', headers: { Origin: origin } }, (res) => { res.resume(); resolve(res.statusCode); });
+    });
+    assert((await status('http://evil.example.com')) === 403, 'foreign origin refused');
+    assert((await status(`http://127.0.0.1:${process.env.PORT}`)) === 200, 'same origin allowed');
   });
 
   console.log(`\n${passed} passed, ${failed} failed\n`);
