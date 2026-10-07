@@ -8,7 +8,8 @@ const path = require('path');
 const { execFile } = require('child_process');
 const { db, save, id, trim, decrypt, DATA_DIR } = require('./store');
 const { broadcast, activity } = require('./events');
-const { withClient } = require('./ftpManager');
+const { withClient, getConnection } = require('./ftpManager');
+const { isNotFound, isSftp } = require('./remote');
 
 const REPOS_DIR = path.join(DATA_DIR, 'repos');
 fs.mkdirSync(REPOS_DIR, { recursive: true });
@@ -250,6 +251,37 @@ async function computeChanges(repo, dir, fromSha, toSha, dep) {
   return { full: true, changes: out.split('\0').filter(Boolean).map((p) => ({ status: 'A', path: p })) };
 }
 
+/** Runs the repo's post-deploy shell command over SSH and streams its output into the deploy log. */
+async function runPostCommand(repo, dep, client, command) {
+  const cwd = repo.postDeployCwd || (repo.mappings && repo.mappings[0] && normRemote(repo.mappings[0].remote)) || null;
+  logDep(dep, 'info', `$ ${command}${cwd ? `   (in ${cwd})` : ''}`);
+  const pending = { stdout: '', stderr: '' };
+  const flush = (kind, final) => {
+    const lines = pending[kind].split(/\r?\n/);
+    pending[kind] = final ? '' : lines.pop();
+    for (const l of lines) if (l.trim()) logDep(dep, kind === 'stderr' ? 'warn' : 'info', `  ${l}`);
+  };
+  try {
+    const r = await client.exec(command, {
+      cwd,
+      timeoutMs: 15 * 60 * 1000,
+      onData: (kind, text) => { pending[kind] += text; flush(kind, false); },
+    });
+    flush('stdout', true);
+    flush('stderr', true);
+    dep.commandExit = r.code;
+    if (r.code === 0) logDep(dep, 'success', 'Post-deploy command finished (exit 0)');
+    else {
+      dep.commandFailed = true;
+      logDep(dep, 'error', `Post-deploy command failed (exit ${r.code}${r.signal ? ', ' + r.signal : ''})`);
+    }
+  } catch (e) {
+    dep.commandFailed = true;
+    dep.commandExit = null;
+    logDep(dep, 'error', `Post-deploy command error: ${e.message}`);
+  }
+}
+
 async function deploy(repo, sha, { full = false, trigger = 'manual' } = {}) {
   const dep = {
     id: id('dep'),
@@ -296,7 +328,10 @@ async function deploy(repo, sha, { full = false, trigger = 'manual' } = {}) {
     logDep(dep, 'info', `${isFull ? 'Full deploy' : `Diff ${dep.from.slice(0, 7)}..${sha.slice(0, 7)}`}: ${changes.length} changed file(s) in repo, ${ops.length} FTP operation(s) after mappings/excludes.`);
     broadcast('deploy', publicDeployment(dep));
 
-    if (ops.length) {
+    const command = String(repo.postDeployCommand || '').trim();
+    const canExec = isSftp(getConnection(repo.connectionId));
+    if (command && !canExec) logDep(dep, 'warn', 'Post-deploy command skipped: the connection is FTP, which cannot run commands (use SFTP/SSH).');
+    if (ops.length || (command && canExec)) {
       await withClient(repo.connectionId, async (client) => {
         const madeDirs = new Set();
         let lastEmit = 0;
@@ -324,14 +359,14 @@ async function deploy(repo, sha, { full = false, trigger = 'manual' } = {}) {
                 dep.deleted++;
                 logDep(dep, 'success', `Deleted ${op.remote}`);
               } catch (e) {
-                if (e.code === 550) logDep(dep, 'warn', `Already absent: ${op.remote}`);
+                if (isNotFound(e)) logDep(dep, 'warn', `Already absent: ${op.remote}`);
                 else throw e;
               }
             }
           } catch (e) {
             dep.failed++;
             logDep(dep, 'error', `${op.type === 'upload' ? 'Upload' : 'Delete'} failed for ${op.remote}: ${e.message}`);
-            if (client.closed) throw new Error(`FTP connection lost: ${e.message}`);
+            if (client.closed) throw new Error(`Connection lost: ${e.message}`);
           }
           dep.done++;
           const now = Date.now();
@@ -340,15 +375,18 @@ async function deploy(repo, sha, { full = false, trigger = 'manual' } = {}) {
             broadcast('deploy', publicDeployment(dep));
           }
         }
+        if (command && canExec && !dep.failed) await runPostCommand(repo, dep, client, command);
       });
     }
 
-    dep.status = dep.failed ? 'failed' : 'success';
+    dep.status = dep.failed ? 'failed' : dep.commandFailed ? 'warning' : 'success';
     if (!dep.failed) {
+      // Files are on the server even if the post-deploy command failed: don't upload them again.
       repo.lastDeployedSha = sha;
       repo.lastDeployedAt = new Date().toISOString();
       repo.failedSha = null;
-      repo.status = 'idle';
+      repo.status = dep.commandFailed ? 'warning' : 'idle';
+      repo.lastError = dep.commandFailed ? `Post-deploy command exited with code ${dep.commandExit}` : null;
     } else {
       repo.failedSha = sha;
       repo.status = 'error';
@@ -363,9 +401,10 @@ async function deploy(repo, sha, { full = false, trigger = 'manual' } = {}) {
   }
   dep.finishedAt = new Date().toISOString();
   const secs = ((Date.parse(dep.finishedAt) - Date.parse(dep.startedAt)) / 1000).toFixed(1);
-  const summary = `${repo.name}: ${dep.status === 'success' ? 'deployed' : 'deploy FAILED'} ${dep.to ? dep.to.slice(0, 7) : ''} — ${dep.uploaded} uploaded, ${dep.deleted} deleted, ${dep.failed} failed (${secs}s)`;
-  logDep(dep, dep.status === 'success' ? 'success' : 'error', summary);
-  activity(dep.status === 'success' ? 'success' : 'error', 'git', summary, { repoId: repo.id, deploymentId: dep.id });
+  const summary = `${repo.name}: ${dep.status === 'success' ? 'deployed' : dep.status === 'warning' ? 'deployed (post-deploy command failed)' : 'deploy FAILED'} ${dep.to ? dep.to.slice(0, 7) : ''} — ${dep.uploaded} uploaded, ${dep.deleted} deleted, ${dep.failed} failed (${secs}s)`;
+  const lvl = dep.status === 'success' ? 'success' : dep.status === 'warning' ? 'warn' : 'error';
+  logDep(dep, lvl === 'warn' ? 'warn' : lvl, summary);
+  activity(lvl, 'git', summary, { repoId: repo.id, deploymentId: dep.id });
   save();
   emitRepo(repo);
   broadcast('deploy', publicDeployment(dep));

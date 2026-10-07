@@ -125,6 +125,8 @@
     if (!r.ok) {
       const e = new Error((data && data.error) || r.statusText || `HTTP ${r.status}`);
       e.status = r.status;
+      e.code = data && data.code;
+      e.data = data;
       throw e;
     }
     return data;
@@ -340,7 +342,7 @@
       ...S.connections.map((c) => {
         const st = sessionOf(c.id).state;
         const item = h('div', { class: `conn-item ${c.id === S.activeConn && S.view === 'explorer' ? 'active' : ''}`, onclick: () => openConnection(c.id), title: `${c.user || 'anonymous'}@${c.host}:${c.port}` },
-          h('div', { class: 'conn-avatar' }, icon(c.secure !== 'none' ? 'shield' : 'server'), h('span', { class: `dot ${st}` })),
+          h('div', { class: 'conn-avatar', title: protoLabel(c) }, icon(isSftpConn(c) ? 'terminal' : c.secure !== 'none' ? 'shield' : 'server'), h('span', { class: `dot ${st}` })),
           h('div', { class: 'conn-meta' }, h('div', { class: 'conn-name' }, c.name), h('div', { class: 'conn-host' }, `${c.user ? c.user + '@' : ''}${c.host}`)),
           ibtn('more', 'Options', (e) => { e.stopPropagation(); connMenu(c, e.clientX, e.clientY); }, 'sm')
         );
@@ -390,9 +392,10 @@
       const st = sessionOf(c.id).state;
       S._tbState = st;
       setKids(tb, 
-        h('div', { style: { minWidth: 0 } }, h('h1', null, c.name), h('div', { class: 'sub mono' }, `${c.user || 'anonymous'}@${c.host}:${c.port} · ${c.secure === 'none' ? 'FTP' : c.secure === 'implicit' ? 'FTPS (implicit)' : 'FTPS (TLS)'}`)),
+        h('div', { style: { minWidth: 0 } }, h('h1', null, c.name), h('div', { class: 'sub mono' }, `${c.user || 'anonymous'}@${c.host}:${c.port} · ${protoLabel(c)}`)),
         h('div', { class: 'spacer' }),
         h('div', { class: 'pill', id: 'sessionPill' }),
+        isSftpConn(c) ? btn('Terminal', 'terminal', toggleTerminal, '', { title: 'Open an SSH terminal on this server' }) : null,
         st === 'connected' || st === 'connecting'
           ? btn('Disconnect', 'unplug', () => disconnect(c.id))
           : btn('Connect', 'plug', () => connectNow(c.id)),
@@ -498,43 +501,99 @@
     }
   }
 
+  const PROTOCOLS = [
+    { v: 'sftp', label: 'SFTP — SSH File Transfer', port: 22 },
+    { v: 'ftp', label: 'FTP (plain)', port: 21 },
+    { v: 'ftps-explicit', label: 'FTPS — explicit TLS', port: 21 },
+    { v: 'ftps-implicit', label: 'FTPS — implicit TLS', port: 990 },
+  ];
+  const protoKey = (c) => (c.protocol === 'sftp' ? 'sftp' : c.secure === 'explicit' ? 'ftps-explicit' : c.secure === 'implicit' ? 'ftps-implicit' : 'ftp');
+  const protoLabel = (c) => ({ sftp: 'SFTP (SSH)', ftp: 'FTP', 'ftps-explicit': 'FTPS (TLS)', 'ftps-implicit': 'FTPS (implicit)' }[protoKey(c)]);
+  const isSftpConn = (c) => !!c && c.protocol === 'sftp';
+
   function openConnectionForm(existing) {
     const isEdit = !!(existing && existing.id);
     const e = existing || {};
+    let trustNewHostKey = false;
     const f = {
       name: h('input', { class: 'input', value: e.name || '', placeholder: 'My website' }),
-      host: h('input', { class: 'input mono', value: e.host || '', placeholder: 'ftp.example.com', spellcheck: 'false' }),
-      port: h('input', { class: 'input mono', type: 'number', value: e.port || 21, min: 1, max: 65535 }),
-      secure: h('select', { class: 'select' },
-        h('option', { value: 'none' }, 'FTP (plain)'),
-        h('option', { value: 'explicit' }, 'FTPS — explicit TLS'),
-        h('option', { value: 'implicit' }, 'FTPS — implicit TLS')),
+      proto: h('select', { class: 'select' }, PROTOCOLS.map((p) => h('option', { value: p.v }, p.label))),
+      host: h('input', { class: 'input mono', value: e.host || '', placeholder: 'example.com', spellcheck: 'false' }),
+      port: h('input', { class: 'input mono', type: 'number', value: e.port || 22, min: 1, max: 65535 }),
       user: h('input', { class: 'input mono', value: e.user || '', placeholder: 'username', autocomplete: 'off', spellcheck: 'false' }),
       password: h('input', { class: 'input mono', type: 'password', placeholder: isEdit && e.hasPassword ? '•••••••• (saved — leave empty to keep)' : 'password', autocomplete: 'new-password' }),
       remoteRoot: h('input', { class: 'input mono', value: e.remoteRoot || '/', placeholder: '/' }),
       allowSelfSigned: h('input', { type: 'checkbox', checked: !!e.allowSelfSigned }),
+      privateKey: h('textarea', { class: 'textarea', rows: 4, spellcheck: 'false', placeholder: e.hasPrivateKey ? 'A private key is saved. Paste a new one to replace it.' : '-----BEGIN OPENSSH PRIVATE KEY-----\n…\n-----END OPENSSH PRIVATE KEY-----' }),
+      keyPath: h('input', { class: 'input mono', value: e.keyPath || '', placeholder: 'C:\\Users\\you\\.ssh\\id_ed25519   or   ~/.ssh/id_ed25519', spellcheck: 'false' }),
+      passphrase: h('input', { class: 'input mono', type: 'password', placeholder: e.hasPassphrase ? '•••••••• (saved)' : 'only if the key is encrypted', autocomplete: 'new-password' }),
+      useAgent: h('input', { type: 'checkbox', checked: !!e.useAgent }),
+      clearKey: h('input', { type: 'checkbox' }),
     };
-    f.secure.value = e.secure || 'none';
-    f.secure.addEventListener('change', () => {
-      if (f.secure.value === 'implicit' && f.port.value === '21') f.port.value = 990;
-      if (f.secure.value !== 'implicit' && f.port.value === '990') f.port.value = 21;
-    });
+    f.proto.value = isEdit || e.protocol ? protoKey(e) : 'sftp';
+    if (!isEdit && !e.port) f.port.value = 22;
+    let lastProto = f.proto.value;
+    const pwLabel = h('label', null, 'Password');
+    const sshBox = h('div', { class: 'stack' },
+      h('div', { class: 'section-title', style: { margin: '4px 0 0' } }, icon('key'), h('h2', null, 'SSH key authentication'), h('span', { class: 'hint' }, 'optional — use instead of, or with, the password')),
+      h('div', { class: 'field' }, h('label', null, 'Private key (paste)'), f.privateKey,
+        e.hasPrivateKey ? h('label', { class: 'check', style: { marginTop: '4px' } }, f.clearKey, h('span', null, 'Remove the saved private key')) : null),
+      h('div', { class: 'grid-2' },
+        h('div', { class: 'field' }, h('label', null, '…or private key file on this computer'), f.keyPath),
+        h('div', { class: 'field' }, h('label', null, 'Key passphrase'), f.passphrase)),
+      h('label', { class: 'check' }, f.useAgent, h('span', null, 'Use my SSH agent', h('div', { class: 'hint' }, 'Windows OpenSSH agent / Pageant-compatible pipe, or SSH_AUTH_SOCK on macOS/Linux.'))),
+      isEdit && e.hostKey ? h('div', { class: 'callout' }, icon('shield'), h('div', null, 'Trusted server host key: ', h('code', null, e.hostKey), h('div', { class: 'hint' }, 'Learned on first connection. If it ever changes you will be warned before anything is sent.'))) : null);
+    const ftpsBox = h('label', { class: 'check' }, f.allowSelfSigned, h('span', null, 'Accept self-signed / invalid TLS certificates', h('div', { class: 'hint' }, 'Only for FTPS servers using their own certificate.')));
+    const syncProto = () => {
+      const p = f.proto.value;
+      const def = PROTOCOLS.find((x) => x.v === p).port;
+      const oldDef = PROTOCOLS.find((x) => x.v === lastProto).port;
+      if (!f.port.value || Number(f.port.value) === oldDef) f.port.value = def;
+      lastProto = p;
+      sshBox.style.display = p === 'sftp' ? '' : 'none';
+      ftpsBox.style.display = p.startsWith('ftps') ? '' : 'none';
+      pwLabel.textContent = p === 'sftp' ? 'Password (SSH)' : 'Password';
+      f.host.placeholder = p === 'sftp' ? 'server.example.com' : 'ftp.example.com';
+    };
+    f.proto.addEventListener('change', syncProto);
+    syncProto();
+
     const result = h('div');
-    const data = () => ({
-      id: isEdit ? e.id : undefined,
-      name: f.name.value, host: f.host.value, port: f.port.value, secure: f.secure.value, user: f.user.value,
-      password: f.password.value || (isEdit ? undefined : ''), remoteRoot: f.remoteRoot.value, allowSelfSigned: f.allowSelfSigned.checked,
-    });
-    const testBtn = btn('Test connection', 'zap', async () => {
+    const data = () => {
+      const p = f.proto.value;
+      const d = {
+        id: isEdit ? e.id : undefined,
+        name: f.name.value, host: f.host.value, port: f.port.value, user: f.user.value,
+        protocol: p === 'sftp' ? 'sftp' : 'ftp',
+        secure: p === 'ftps-explicit' ? 'explicit' : p === 'ftps-implicit' ? 'implicit' : 'none',
+        password: f.password.value || (isEdit ? undefined : ''),
+        remoteRoot: f.remoteRoot.value, allowSelfSigned: f.allowSelfSigned.checked,
+      };
+      if (p === 'sftp') {
+        Object.assign(d, { keyPath: f.keyPath.value, useAgent: f.useAgent.checked, trustNewHostKey });
+        if (f.privateKey.value.trim()) d.privateKey = f.privateKey.value;
+        if (f.clearKey.checked) d.clearPrivateKey = true;
+        if (f.passphrase.value) d.passphrase = f.passphrase.value;
+      }
+      return d;
+    };
+    const runTest = async () => {
       testBtn.disabled = true;
       setKids(result, h('div', { class: 'callout' }, icon('loader', 'spin'), 'Connecting…'));
       try {
         const r = await api('POST', '/api/connections/test', data());
-        setKids(result, h('div', { class: 'callout ok' }, icon('check-circle'), h('div', null, h('b', null, `Connected in ${r.ms} ms. `), `Home folder: `, h('code', null, r.pwd), r.features.length ? h('div', { class: 'hint' }, `Server features: ${r.features.slice(0, 12).join(', ')}`) : null)));
+        setKids(result, h('div', { class: 'callout ok' }, icon('check-circle'), h('div', null,
+          h('b', null, `Connected in ${r.ms} ms. `), 'Home folder: ', h('code', null, r.pwd),
+          r.hostKey ? h('div', { class: 'hint' }, `Server host key ${r.hostKeyKnown && !trustNewHostKey ? '(matches the trusted key)' : '(will be trusted when you save)'}: `, h('code', null, r.hostKey)) : null,
+          r.features.length ? h('div', { class: 'hint' }, `Features: ${r.features.slice(0, 12).join(', ')}`) : null)));
       } catch (err) {
-        setKids(result, h('div', { class: 'callout err' }, icon('x-circle'), err.message));
+        if (err.code === 'HOSTKEY_MISMATCH') {
+          setKids(result, h('div', { class: 'callout err' }, icon('alert'), h('div', null, err.message,
+            h('div', { style: { marginTop: '8px' } }, btn('Trust new host key', 'shield', () => { trustNewHostKey = true; runTest(); }, 'sm danger')))));
+        } else setKids(result, h('div', { class: 'callout err' }, icon('x-circle'), err.message));
       } finally { testBtn.disabled = false; }
-    });
+    };
+    const testBtn = btn('Test connection', 'zap', runTest);
     const saveBtn = btn(isEdit ? 'Save changes' : 'Save connection', 'check', async () => {
       saveBtn.disabled = true;
       try {
@@ -549,27 +608,198 @@
       } finally { saveBtn.disabled = false; }
     }, 'primary');
     const m = modal({
-      title: isEdit ? `Edit ${e.name}` : 'New FTP connection',
+      title: isEdit ? `Edit ${e.name}` : 'New connection',
       iconName: 'server',
       size: 'wide',
       body: h('form', { class: 'stack', onsubmit: (ev) => { ev.preventDefault(); saveBtn.click(); } },
-        h('div', { class: 'field' }, h('label', null, 'Display name'), f.name),
+        h('div', { class: 'grid-2' },
+          h('div', { class: 'field' }, h('label', null, 'Display name'), f.name),
+          h('div', { class: 'field' }, h('label', null, 'Protocol'), f.proto)),
         h('div', { class: 'grid-3' },
           h('div', { class: 'field' }, h('label', null, 'Host'), f.host),
           h('div', { class: 'field' }, h('label', null, 'Port'), f.port),
-          h('div', { class: 'field' }, h('label', null, 'Protocol'), f.secure)),
+          h('div', { class: 'field' }, h('label', null, 'Start folder'), f.remoteRoot)),
         h('div', { class: 'grid-2' },
           h('div', { class: 'field' }, h('label', null, 'Username'), f.user),
-          h('div', { class: 'field' }, h('label', null, 'Password'), f.password)),
-        h('div', { class: 'field' }, h('label', null, 'Start folder'), f.remoteRoot, h('div', { class: 'hint' }, 'Folder opened when you connect, e.g. /public_html')),
-        h('label', { class: 'check' }, f.allowSelfSigned, h('span', null, 'Accept self-signed / invalid TLS certificates', h('div', { class: 'hint' }, 'Only for FTPS servers using their own certificate.'))),
-        h('div', { class: 'callout' }, icon('lock'), h('div', null, 'Your password is encrypted (AES-256-GCM) and stored only on this computer. The app reconnects with it automatically, so you never have to log in again after an idle disconnect.')),
+          h('div', { class: 'field' }, pwLabel, f.password)),
+        sshBox,
+        ftpsBox,
+        h('div', { class: 'callout' }, icon('lock'), h('div', null, 'Passwords and keys are encrypted (AES-256-GCM) and stored only on this computer. The app reconnects with them automatically, so you never log in again after an idle disconnect.')),
         result,
         h('button', { type: 'submit', hidden: true })
       ),
       foot: [h('div', { class: 'left' }, testBtn), btn('Cancel', null, () => m.close()), saveBtn],
     });
   }
+
+  // ================================================================ SSH terminal dock
+  const T = { tabs: [], active: null, open: false, max: false, height: LS.get('termH', 320) };
+  let xtermLoading = null;
+
+  function loadScript(src) {
+    return new Promise((resolve, reject) => {
+      const s = document.createElement('script');
+      s.src = src;
+      s.onload = resolve;
+      s.onerror = () => reject(new Error(`Could not load ${src}`));
+      document.head.append(s);
+    });
+  }
+  function loadXterm() {
+    if (window.Terminal && window.FitAddon) return Promise.resolve();
+    if (!xtermLoading) {
+      document.head.append(h('link', { rel: 'stylesheet', href: '/vendor/xterm/css/xterm.css' }));
+      xtermLoading = loadScript('/vendor/xterm/lib/xterm.js').then(() => loadScript('/vendor/xterm-fit/lib/addon-fit.js'));
+    }
+    return xtermLoading;
+  }
+
+  const TERM_THEME = {
+    background: '#06080c', foreground: '#d6dceb', cursor: '#a5b4fc', selectionBackground: 'rgba(124,108,255,0.35)',
+    black: '#1b2130', red: '#fb7185', green: '#4ade80', yellow: '#fbbf24', blue: '#60a5fa', magenta: '#c084fc', cyan: '#22d3ee', white: '#e5e7eb',
+    brightBlack: '#5d6884', brightRed: '#fda4af', brightGreen: '#86efac', brightYellow: '#fde68a', brightBlue: '#93c5fd', brightMagenta: '#d8b4fe', brightCyan: '#67e8f9', brightWhite: '#ffffff',
+  };
+
+  async function openTerminal(cid = S.activeConn, cwd = null) {
+    const c = conn(cid);
+    if (!c) return;
+    if (!isSftpConn(c)) { toast('warn', 'Terminal needs SSH', 'Edit this connection and choose SFTP — FTP servers cannot run commands.'); return; }
+    try { await loadXterm(); } catch (e) { toast('error', 'Terminal unavailable', e.message); return; }
+    const term = new window.Terminal({ fontFamily: getComputedStyle(document.body).getPropertyValue('--mono') || 'monospace', fontSize: 13, lineHeight: 1.2, cursorBlink: true, scrollback: 10000, theme: TERM_THEME, allowProposedApi: false });
+    const fit = new window.FitAddon.FitAddon();
+    term.loadAddon(fit);
+    const tab = { id: uid(), cid, cwd, term, fit, ws: null, status: 'connecting', el: h('div', { class: 'term-pane' }) };
+    T.tabs.push(tab);
+    T.active = tab.id;
+    T.open = true;
+    renderDock();
+    term.open(tab.el);
+    fitTab(tab);
+    term.onData((d) => {
+      if (tab.ws && tab.ws.readyState === 1 && tab.status === 'connected') tab.ws.send(JSON.stringify({ t: 'd', d }));
+      else if (['closed', 'idle', 'error'].includes(tab.status)) connectTab(tab);
+    });
+    term.onResize(({ cols, rows }) => { if (tab.ws && tab.ws.readyState === 1) tab.ws.send(JSON.stringify({ t: 'r', cols, rows })); });
+    connectTab(tab);
+    term.focus();
+  }
+
+  function connectTab(tab) {
+    const c = conn(tab.cid);
+    if (!c) return;
+    tab.status = 'connecting';
+    renderDockTabs();
+    tab.term.write(`\x1b[90mConnecting to ${c.user}@${c.host}:${c.port}…\x1b[0m\r\n`);
+    const params = q({ cols: tab.term.cols, rows: tab.term.rows, cwd: tab.cwd || '' });
+    const ws = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/api/ssh/${tab.cid}/shell?${params}`);
+    tab.ws = ws;
+    ws.onmessage = (ev) => {
+      let m;
+      try { m = JSON.parse(ev.data); } catch { return; }
+      if (m.t === 'd') tab.term.write(m.d);
+      else if (m.t === 'ready') { tab.status = 'connected'; renderDockTabs(); if (T.active === tab.id) tab.term.focus(); }
+      else if (m.t === 'exit') { tab.status = 'closed'; tab.term.write('\r\n\x1b[90m[session closed — press any key to reconnect]\x1b[0m\r\n'); renderDockTabs(); }
+      else if (m.t === 'idle') { tab.status = 'idle'; tab.term.write(`\r\n\x1b[33m[disconnected after ${S.settings.idleTimeoutMin} min of inactivity — press any key to reconnect, no password needed]\x1b[0m\r\n`); renderDockTabs(); }
+      else if (m.t === 'err') {
+        tab.status = 'error';
+        tab.term.write(`\r\n\x1b[31m${m.msg}\x1b[0m\r\n`);
+        if (m.code === 'HOSTKEY_MISMATCH') tab.term.write('\x1b[90mOpen the connection settings to review and trust the new key.\x1b[0m\r\n');
+        else tab.term.write('\x1b[90m[press any key to retry]\x1b[0m\r\n');
+        renderDockTabs();
+      }
+    };
+    ws.onclose = () => {
+      if (tab.ws !== ws) return;
+      if (tab.status === 'connected' || tab.status === 'connecting') {
+        tab.status = 'closed';
+        tab.term.write('\r\n\x1b[90m[connection closed — press any key to reconnect]\x1b[0m\r\n');
+        renderDockTabs();
+      }
+    };
+  }
+
+  function fitTab(tab) {
+    try { tab.fit.fit(); } catch {}
+  }
+
+  function closeTab(id) {
+    const i = T.tabs.findIndex((t) => t.id === id);
+    if (i < 0) return;
+    const [tab] = T.tabs.splice(i, 1);
+    tab.status = 'closed';
+    try { tab.ws && tab.ws.close(); } catch {}
+    try { tab.term.dispose(); } catch {}
+    if (T.active === id) T.active = T.tabs.length ? T.tabs[Math.max(0, i - 1)].id : null;
+    if (!T.tabs.length) T.open = false;
+    renderDock();
+  }
+
+  function toggleTerminal() {
+    const c = conn();
+    if (T.open) { T.open = false; renderDock(); return; }
+    const existing = T.tabs.find((t) => t.cid === (c && c.id)) || T.tabs[0];
+    if (existing) { T.active = existing.id; T.open = true; renderDock(); return; }
+    openTerminal(c && c.id, S.ex.path);
+  }
+
+  function renderDock() {
+    const dock = $('#termDock');
+    dock.classList.toggle('show', T.open && T.tabs.length > 0);
+    dock.classList.toggle('max', T.max);
+    dock.style.height = T.max ? '' : `${T.height}px`;
+    if (!T.tabs.length) { setKids(dock); return; }
+    if (!dock.querySelector('.term-head')) {
+      const handle = h('div', { class: 'term-resize', title: 'Drag to resize' });
+      handle.addEventListener('mousedown', (ev) => {
+        ev.preventDefault();
+        const startY = ev.clientY;
+        const startH = dock.getBoundingClientRect().height;
+        const move = (e2) => {
+          T.height = Math.min(window.innerHeight - 160, Math.max(140, startH + (startY - e2.clientY)));
+          dock.style.height = `${T.height}px`;
+          const t = T.tabs.find((x) => x.id === T.active);
+          t && fitTab(t);
+        };
+        const up = () => { document.removeEventListener('mousemove', move); document.removeEventListener('mouseup', up); LS.set('termH', T.height); };
+        document.addEventListener('mousemove', move);
+        document.addEventListener('mouseup', up);
+      });
+      setKids(dock, handle,
+        h('div', { class: 'term-head' },
+          h('div', { class: 'term-tabs', id: 'termTabs' }),
+          ibtn('plus', 'New terminal', () => {
+            const t = T.tabs.find((x) => x.id === T.active);
+            const c = conn() && isSftpConn(conn()) ? conn() : t ? conn(t.cid) : null;
+            if (c) openTerminal(c.id, S.activeConn === c.id ? S.ex.path : null);
+          }, 'sm'),
+          ibtn(T.max ? 'chevron-down' : 'chevron-up', 'Maximize / restore', () => { T.max = !T.max; setKids(dock); renderDock(); }, 'sm'),
+          ibtn('x', 'Hide panel (sessions stay open)', () => { T.open = false; renderDock(); }, 'sm')),
+        h('div', { class: 'term-body', id: 'termBody' }));
+      new ResizeObserver(() => { const t = T.tabs.find((x) => x.id === T.active); t && T.open && fitTab(t); }).observe(dock);
+    }
+    const body = $('#termBody');
+    for (const t of T.tabs) {
+      if (t.el.parentNode !== body) body.append(t.el);
+      t.el.style.display = t.id === T.active ? '' : 'none';
+    }
+    renderDockTabs();
+    const act = T.tabs.find((x) => x.id === T.active);
+    if (act && T.open) requestAnimationFrame(() => { fitTab(act); act.term.focus(); });
+  }
+
+  function renderDockTabs() {
+    const host = $('#termTabs');
+    if (!host) return;
+    setKids(host, T.tabs.map((t) => {
+      const c = conn(t.cid);
+      const dot = { connected: 'connected', connecting: 'connecting', idle: 'idle', error: 'error' }[t.status] || 'disconnected';
+      return h('div', { class: `term-tab ${t.id === T.active ? 'active' : ''}`, onclick: () => { T.active = t.id; renderDock(); }, title: t.cwd ? `${c ? c.name : ''} — ${t.cwd}` : c ? c.name : '' },
+        h('span', { class: `dot ${dot}` }), icon('terminal'), h('span', { class: 'n' }, `${c ? c.name : 'closed'}${t.cwd ? ` · ${baseName(t.cwd) || '/'}` : ''}`),
+        h('button', { class: 'x', title: 'Close terminal', onclick: (ev) => { ev.stopPropagation(); closeTab(t.id); } }, icon('x')));
+    }));
+  }
+
+  window.addEventListener('resize', () => { const t = T.tabs.find((x) => x.id === T.active); t && T.open && fitTab(t); });
 
   // ================================================================ explorer
   function renderExplorer(ct) {
@@ -627,6 +857,8 @@
         { label: 'New file', icon: 'file-plus', action: newFile },
         { label: 'Refresh', icon: 'refresh', kbd: 'F5', action: () => loadDir(ex.path) },
         { label: 'Copy current path', icon: 'copy', action: () => copyText(ex.path) },
+        isSftpConn(conn()) && '-',
+        isSftpConn(conn()) && { label: 'Open terminal here', icon: 'terminal', action: () => openTerminal(S.activeConn, ex.path) },
       ]);
     });
     wrap.addEventListener('mousedown', (e) => {
@@ -861,6 +1093,7 @@
       one && { label: 'Rename / move…', icon: 'edit', kbd: 'F2', action: () => renameEntry(one) },
       one && { label: 'Permissions…', icon: 'lock', action: () => chmodEntry(one) },
       { label: 'Copy path', icon: 'copy', action: () => copyText(sel.map((s) => s.path).join('\n')) },
+      isSftpConn(conn()) && { label: 'Open terminal here', icon: 'terminal', action: () => openTerminal(S.activeConn, one && one.type === 'dir' ? one.path : S.ex.path) },
       '-',
       { label: sel.length > 1 ? `Delete ${sel.length} items` : 'Delete', icon: 'trash', kbd: 'Del', danger: true, action: () => deleteEntries(sel) },
     ]);
@@ -1170,6 +1403,7 @@
       case 'checking': return h('span', { class: 'badge info' }, icon('loader', 'spin'), 'Checking');
       case 'deploying': return h('span', { class: 'badge accent' }, icon('loader', 'spin'), 'Deploying');
       case 'error': return h('span', { class: 'badge danger' }, icon('alert'), 'Error');
+      case 'warning': return h('span', { class: 'badge warn' }, icon('alert'), 'Command failed');
       default: return r.lastRemoteSha && r.lastRemoteSha !== r.lastDeployedSha ? h('span', { class: 'badge warn' }, icon('clock'), 'Pending') : h('span', { class: 'badge success' }, icon('check'), 'Up to date');
     }
   }
@@ -1177,6 +1411,7 @@
   function depStatusBadge(d) {
     if (d.status === 'running') return h('span', { class: 'badge accent' }, icon('loader', 'spin'), 'Running');
     if (d.status === 'success') return h('span', { class: 'badge success' }, icon('check'), 'Success');
+    if (d.status === 'warning') return h('span', { class: 'badge warn', title: 'Files deployed; the post-deploy command failed' }, icon('alert'), 'Cmd failed');
     return h('span', { class: 'badge danger' }, icon('x'), 'Failed');
   }
 
@@ -1331,11 +1566,13 @@
       localPath: h('input', { class: 'input mono', value: e.localPath || '', placeholder: '(optional) D:\\Projects\\my-site', spellcheck: 'false' }),
       gitUser: h('input', { class: 'input mono', value: e.gitUser || '', placeholder: 'x-access-token', autocomplete: 'off' }),
       token: h('input', { class: 'input mono', type: 'password', placeholder: e.hasToken ? '•••••••• (saved — leave empty to keep)' : 'ghp_… (only for private HTTPS repos)', autocomplete: 'new-password' }),
-      connectionId: h('select', { class: 'select' }, S.connections.map((c) => h('option', { value: c.id }, `${c.name} — ${c.host}`))),
+      connectionId: h('select', { class: 'select' }, S.connections.map((c) => h('option', { value: c.id }, `${c.name} — ${protoLabel(c)} ${c.host}`))),
       excludes: h('textarea', { class: 'textarea', rows: 3, value: (e.excludes || []).join('\n'), placeholder: 'node_modules/\n*.map\n.env' }),
       pollSec: h('input', { class: 'input', type: 'number', min: 10, value: e.pollSec || 60 }),
       enabled: h('input', { type: 'checkbox', checked: e.enabled !== false }),
       initialDeploy: h('input', { type: 'checkbox', checked: !!e.initialDeploy }),
+      postCmd: h('input', { class: 'input mono', value: e.postDeployCommand || '', placeholder: 'e.g. composer install --no-dev && php artisan migrate --force', spellcheck: 'false' }),
+      postCwd: h('input', { class: 'input mono', value: e.postDeployCwd || '', placeholder: '(default: first mapping folder)', spellcheck: 'false' }),
       installHook: h('input', { type: 'checkbox', checked: true }),
     };
     f.connectionId.value = e.connectionId || S.activeConn || S.connections[0].id;
@@ -1392,6 +1629,7 @@
         name: f.name.value, url: f.url.value.trim() || f.source.value.trim(), localPath: f.localPath.value.trim(), branch: f.branch.value.trim(),
         connectionId: f.connectionId.value, mappings, excludes: f.excludes.value, pollSec: f.pollSec.value, enabled: f.enabled.checked,
         initialDeploy: f.initialDeploy.checked, gitUser: f.gitUser.value, installHook: f.installHook.checked,
+        postDeployCommand: f.postCmd.value, postDeployCwd: f.postCwd.value,
       };
       if (f.token.value) body.token = f.token.value;
       saveBtn.disabled = true;
@@ -1413,6 +1651,21 @@
       } finally { saveBtn.disabled = false; }
     }, 'primary');
 
+    const cmdHint = h('div', { class: 'hint' });
+    const syncCmdHint = () => {
+      const c = conn(f.connectionId.value);
+      cmdHint.textContent = isSftpConn(c)
+        ? 'Runs over SSH after the files are uploaded. Output appears in the deployment log; a non-zero exit marks the deploy "Cmd failed".'
+        : 'Only available for SFTP/SSH connections — FTP cannot run commands. It will be skipped for this connection.';
+    };
+    f.connectionId.addEventListener('change', syncCmdHint);
+    syncCmdHint();
+    const cmdBox = h('div', { class: 'stack', style: { gap: '8px' } },
+      h('div', { class: 'section-title', style: { margin: '6px 0 0' } }, icon('terminal'), h('h2', null, 'After deploy (SSH)')),
+      h('div', { class: 'grid-2' },
+        h('div', { class: 'field' }, h('label', null, 'Run command'), f.postCmd),
+        h('div', { class: 'field' }, h('label', null, 'In folder'), f.postCwd)),
+      cmdHint);
     const details = h('details', { open: !!e.hasToken || undefined },
       h('summary', { style: { cursor: 'pointer', color: 'var(--text-2)', fontSize: '13px', fontWeight: 600 } }, 'Private repository over HTTPS (access token)'),
       h('div', { class: 'grid-2', style: { marginTop: '10px' } },
@@ -1432,7 +1685,7 @@
           h('div', { class: 'field' }, h('label', null, 'Remote watched (where you push)'), f.url),
           h('div', { class: 'field' }, h('label', null, 'Local folder (for push hook)'), f.localPath)),
         details,
-        h('div', { class: 'field' }, h('label', null, 'Deploy to FTP connection'), f.connectionId),
+        h('div', { class: 'field' }, h('label', null, 'Deploy to connection (FTP, FTPS or SFTP)'), f.connectionId),
         h('div', { class: 'field' }, h('label', null, 'Folder mappings — repository folder → FTP folder'), mapHost),
         h('div', { class: 'grid-2' },
           h('div', { class: 'field' }, h('label', null, 'Exclude (one pattern per line)'), f.excludes, h('div', { class: 'hint' }, 'Glob patterns: node_modules/, *.map, src/**/*.test.js')),
@@ -1440,7 +1693,8 @@
             h('div', { class: 'field' }, h('label', null, 'Check remote every (seconds)'), f.pollSec),
             h('label', { class: 'check' }, f.enabled, h('span', null, 'Auto-deploy enabled')),
             !isEdit && h('label', { class: 'check' }, f.initialDeploy, h('span', null, 'Upload all current files now', h('div', { class: 'hint' }, 'Otherwise the current commit is the baseline and only future pushes are uploaded.'))),
-            h('label', { class: 'check' }, f.installHook, h('span', null, 'Install git pre-push hook', h('div', { class: 'hint' }, 'Deploys seconds after "git push" (needs local folder).')))))),
+            h('label', { class: 'check' }, f.installHook, h('span', null, 'Install git pre-push hook', h('div', { class: 'hint' }, 'Deploys seconds after "git push" (needs local folder).'))))),
+        cmdBox),
       foot: [btn('Cancel', null, () => m.close()), saveBtn],
     });
     if (isEdit) setKids(branchList, h('option', { value: e.branch }));
@@ -1486,7 +1740,7 @@
 
   // ================================================================ activity view
   function renderActivity(ct) {
-    const filters = [['all', 'All'], ['ftp', 'FTP'], ['git', 'Git'], ['app', 'App'], ['error', 'Errors']];
+    const filters = [['all', 'All'], ['ftp', 'Files'], ['ssh', 'SSH'], ['git', 'Git'], ['app', 'App'], ['error', 'Errors']];
     const seg = h('div', { class: 'seg' }, filters.map(([k, l]) => h('button', { class: S.actFilter === k ? 'active' : '', onclick: () => { S.actFilter = k; renderActivity(ct); } }, l)));
     const search = h('input', { class: 'input', placeholder: 'Search activity…', value: S.actSearch, oninput: (e) => { S.actSearch = e.target.value; renderList(); } });
     const listHost = h('div', { class: 'card log' });
@@ -1582,7 +1836,7 @@
       if (S.activity.length > 500) S.activity.length = 500;
       if (S.view === 'activity') { const ct = $('#content'); ct._renderList ? ct._renderList() : renderContent(); }
       if (a.level === 'error') renderNav();
-      if (a.scope === 'git' && (a.level === 'success' || a.level === 'error') && a.deploymentId) toast(a.level, a.level === 'success' ? 'Deployed to FTP' : 'Deployment failed', a.message);
+      if (a.scope === 'git' && a.level !== 'info' && a.deploymentId) toast(a.level, a.level === 'success' ? 'Deployed' : a.level === 'warn' ? 'Deployed — command failed' : 'Deployment failed', a.message);
     });
     on('activity-cleared', () => { S.activity = []; if (S.view === 'activity') renderContent(); renderNav(); });
     on('repo', (r) => {

@@ -9,6 +9,8 @@ const { db, save, encrypt, id, DATA_DIR } = require('./store');
 const events = require('./events');
 const ftpm = require('./ftpManager');
 const gitSync = require('./gitSync');
+const terminal = require('./terminal');
+const { isSftp } = require('./remote');
 
 const PORT = Number(process.env.PORT) || 4280;
 const HOST = process.env.HOST || '127.0.0.1';
@@ -21,6 +23,9 @@ app.disable('x-powered-by');
 app.use(express.json({ limit: '25mb' }));
 app.use(express.text({ limit: '25mb', type: 'text/plain' }));
 app.use(express.static(path.join(__dirname, '..', 'public'), { index: 'index.html' }));
+// xterm.js for the SSH terminal, served locally (works offline).
+app.use('/vendor/xterm', express.static(path.join(path.dirname(require.resolve('@xterm/xterm/package.json')))));
+app.use('/vendor/xterm-fit', express.static(path.join(path.dirname(require.resolve('@xterm/addon-fit/package.json')))));
 
 // Only accept requests addressed to this machine (blocks DNS-rebinding from web pages).
 app.use('/api', (req, res, next) => {
@@ -45,26 +50,40 @@ function remotePath(p, base = '/') {
 // ------------------------------------------------------------ public views
 
 function publicConnection(c) {
-  const { passwordEnc, ...rest } = c;
-  return { ...rest, hasPassword: !!passwordEnc };
+  const { passwordEnc, privateKeyEnc, passphraseEnc, ...rest } = c;
+  return { ...rest, protocol: c.protocol || 'ftp', hasPassword: !!passwordEnc, hasPrivateKey: !!privateKeyEnc, hasPassphrase: !!passphraseEnc };
 }
 
 function connectionFromBody(body, existing = {}) {
-  const host = String(body.host ?? existing.host ?? '').trim().replace(/^s?ftps?:\/\//i, '').replace(/\/.*$/, '');
+  const protocol = body.protocol === 'sftp' || (body.protocol === undefined && existing.protocol === 'sftp') ? 'sftp' : 'ftp';
+  const host = String(body.host ?? existing.host ?? '').trim().replace(/^(s?ftps?|ssh):\/\//i, '').replace(/\/.*$/, '');
   if (!host) throw httpError(400, 'Host is required');
-  const secure = ['none', 'explicit', 'implicit'].includes(body.secure) ? body.secure : existing.secure || 'none';
+  const secure = protocol === 'sftp' ? 'none' : ['none', 'explicit', 'implicit'].includes(body.secure) ? body.secure : existing.secure || 'none';
   const out = {
     ...existing,
+    protocol,
     name: String(body.name ?? existing.name ?? '').trim() || host,
     host,
-    port: Number(body.port) || (secure === 'implicit' ? 990 : 21),
+    port: Number(body.port ?? existing.port) || (protocol === 'sftp' ? 22 : secure === 'implicit' ? 990 : 21),
     user: String(body.user ?? existing.user ?? '').trim(),
     secure,
-    allowSelfSigned: !!(body.allowSelfSigned ?? existing.allowSelfSigned),
+    allowSelfSigned: protocol === 'ftp' && !!(body.allowSelfSigned ?? existing.allowSelfSigned),
     remoteRoot: remotePath(body.remoteRoot ?? existing.remoteRoot ?? '/'),
     color: body.color ?? existing.color ?? null,
   };
-  if (typeof body.password === 'string' && (body.password !== '' || body.clearPassword)) out.passwordEnc = encrypt(body.password);
+  if (protocol === 'sftp' && !out.user) throw httpError(400, 'Username is required for SFTP');
+  if (typeof body.password === 'string' && (body.password !== '' || body.clearPassword)) out.passwordEnc = body.password ? encrypt(body.password) : null;
+  if (protocol === 'sftp') {
+    if (body.keyPath !== undefined) out.keyPath = String(body.keyPath || '').trim() || null;
+    if (typeof body.privateKey === 'string' && body.privateKey.trim()) out.privateKeyEnc = encrypt(body.privateKey.trim() + '\n');
+    if (body.clearPrivateKey) out.privateKeyEnc = null;
+    if (typeof body.passphrase === 'string' && (body.passphrase !== '' || body.clearPassphrase)) out.passphraseEnc = body.passphrase ? encrypt(body.passphrase) : null;
+    if (body.useAgent !== undefined) out.useAgent = !!body.useAgent;
+    if (body.trustNewHostKey) delete out.hostKey;
+    if (existing.host && (existing.host !== host || Number(existing.port) !== out.port)) delete out.hostKey; // new server: re-learn its key
+  } else {
+    delete out.hostKey;
+  }
   return out;
 }
 
@@ -146,9 +165,8 @@ app.post('/api/connections/test', wrap(async (req, res) => {
   const client = await ftpm.openClient(conn, 15000);
   try {
     const pwd = await client.pwd();
-    let features = [];
-    try { features = [...(await client.features()).keys()]; } catch {}
-    res.json({ ok: true, pwd, ms: Date.now() - t0, secure: conn.secure, features });
+    const features = await client.features();
+    res.json({ ok: true, pwd, ms: Date.now() - t0, protocol: conn.protocol, secure: conn.secure, features, hostKey: client.hostKey || null, hostKeyKnown: !!conn.hostKey });
   } finally {
     client.close();
   }
@@ -160,31 +178,26 @@ app.post('/api/connections/:id/connect', wrap(async (req, res) => {
   res.json(s.status());
 }));
 
+// Run one SSH command (SFTP connections only). Used by "Run command" and handy for scripts.
+app.post('/api/connections/:id/exec', wrap(async (req, res) => {
+  const conn = ftpm.getConnection(req.params.id);
+  if (!isSftp(conn)) throw httpError(400, 'Commands need an SFTP/SSH connection.');
+  const command = String(req.body?.command || '').trim();
+  if (!command) throw httpError(400, 'Command is required');
+  const cwd = req.body?.cwd ? remotePath(req.body.cwd) : null;
+  ftpm.session(conn.id).touch();
+  const result = await ftpm.withClient(conn.id, (client) => client.exec(command, { cwd, timeoutMs: 5 * 60 * 1000 }));
+  events.activity(result.code === 0 ? 'success' : 'warn', 'ssh', `$ ${command.length > 80 ? command.slice(0, 80) + '…' : command} → exit ${result.code}`, { connectionId: conn.id });
+  res.json(result);
+}));
+
 app.post('/api/connections/:id/disconnect', (req, res) => {
   const s = ftpm.session(req.params.id);
   s.close('manual');
   res.json(s.status());
 });
 
-// ------------------------------------------------------------ FTP file operations
-
-function entryType(f) {
-  if (f.isDirectory) return 'dir';
-  if (f.isSymbolicLink) return 'link';
-  return 'file';
-}
-
-function permString(f) {
-  if (!f.permissions) return '';
-  const p = f.permissions;
-  const tri = (n) => `${n & 4 ? 'r' : '-'}${n & 2 ? 'w' : '-'}${n & 1 ? 'x' : '-'}`;
-  return `${tri(p.user)}${tri(p.group)}${tri(p.world)}`;
-}
-
-function permOctal(f) {
-  if (!f.permissions) return '';
-  return `${f.permissions.user}${f.permissions.group}${f.permissions.world}`;
-}
+// ------------------------------------------------------------ remote file operations (FTP, FTPS, SFTP)
 
 app.get('/api/ftp/:id/list', wrap(async (req, res) => {
   const conn = ftpm.getConnection(req.params.id);
@@ -192,18 +205,7 @@ app.get('/api/ftp/:id/list', wrap(async (req, res) => {
   const dir = remotePath(req.query.path, conn.remoteRoot || '/');
   const list = await s.run((c) => c.list(dir));
   const entries = list
-    .filter((f) => f.name !== '.' && f.name !== '..')
-    .map((f) => ({
-      name: f.name,
-      path: path.posix.join(dir, f.name),
-      type: entryType(f),
-      size: f.size,
-      modifiedAt: f.modifiedAt ? f.modifiedAt.toISOString() : null,
-      rawModifiedAt: f.rawModifiedAt || '',
-      permissions: permString(f),
-      mode: permOctal(f),
-      link: f.link || '',
-    }))
+    .map((f) => ({ ...f, path: path.posix.join(dir, f.name) }))
     .sort((a, b) => (a.type === 'dir') === (b.type === 'dir') ? a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' }) : a.type === 'dir' ? -1 : 1);
   res.json({ path: dir, entries });
 }));
@@ -212,7 +214,7 @@ app.post('/api/ftp/:id/mkdir', wrap(async (req, res) => {
   const p = remotePath(req.body.path);
   if (p === '/') throw httpError(400, 'Invalid folder name');
   const s = ftpm.session(req.params.id);
-  await s.run((c) => c.send(`MKD ${p}`));
+  await s.run((c) => c.mkdir(p));
   events.activity('success', 'ftp', `Created folder ${p}`, { connectionId: req.params.id });
   res.json({ ok: true });
 }));
@@ -253,7 +255,7 @@ app.post('/api/ftp/:id/chmod', wrap(async (req, res) => {
   const mode = String(req.body.mode || '').trim();
   if (!/^[0-7]{3,4}$/.test(mode)) throw httpError(400, 'Mode must be octal, e.g. 644 or 755');
   const s = ftpm.session(req.params.id);
-  await s.run((c) => c.send(`SITE CHMOD ${mode} ${p}`));
+  await s.run((c) => c.chmod(p, mode));
   events.activity('success', 'ftp', `chmod ${mode} ${p}`, { connectionId: req.params.id });
   res.json({ ok: true });
 }));
@@ -333,19 +335,16 @@ app.post('/api/ftp/:id/upload', upload.array('files'), wrap(async (req, res) => 
             madeDirs.add(parent);
           }
           let last = 0;
-          client.trackProgress((info) => {
+          await client.uploadFrom(f.path, target, (bytes) => {
             const now = Date.now();
             if (now - last < 150) return;
             last = now;
-            events.broadcast('transfer', { tid, phase: 'ftp', name: relName, index: i, count: files.length, bytes: doneBytes + info.bytes, total });
+            events.broadcast('transfer', { tid, phase: 'ftp', name: relName, index: i, count: files.length, bytes: doneBytes + bytes, total });
           });
-          await client.uploadFrom(f.path, target);
-          client.trackProgress();
           doneBytes += f.size;
           s.touch();
           results.push({ path: target, ok: true, size: f.size });
         } catch (e) {
-          client.trackProgress();
           results.push({ path: target, ok: false, error: e.message });
           if (client.closed) {
             for (let j = i + 1; j < files.length; j++) results.push({ path: path.posix.join(dir, rel[j] || files[j].originalname), ok: false, error: 'Connection lost' });
@@ -399,6 +398,8 @@ function repoFromBody(b, existing = {}) {
     enabled: b.enabled ?? existing.enabled ?? true,
     initialDeploy: !!(b.initialDeploy ?? existing.initialDeploy),
     gitUser: String(b.gitUser ?? existing.gitUser ?? '').trim() || null,
+    postDeployCommand: String(b.postDeployCommand ?? existing.postDeployCommand ?? '').trim() || null,
+    postDeployCwd: String(b.postDeployCwd ?? existing.postDeployCwd ?? '').trim() || null,
   };
   if (typeof b.token === 'string' && (b.token !== '' || b.clearToken)) out.tokenEnc = b.token ? encrypt(b.token) : null;
   return out;
@@ -522,12 +523,19 @@ app.get('/api/deployments/:id', (req, res) => {
 app.use('/api', (req, res) => res.status(404).json({ error: 'Not found' }));
 
 app.use((err, req, res, _next) => {
-  const status = err.status || (err.code === 530 ? 401 : err.code === 550 ? 404 : typeof err.code === 'number' && err.code >= 400 ? 400 : /^E[A-Z]+/.test(String(err.code || '')) ? 502 : 500);
+  const c = err.code;
+  const status = err.status
+    || (c === 530 || c === 'AUTH' ? 401
+      : err.notFound || c === 550 ? 404
+        : c === 3 ? 403
+          : c === 'HOSTKEY_MISMATCH' ? 409
+            : typeof c === 'number' ? 400
+              : /^E[A-Z]+/.test(String(c || '')) ? 502 : 500);
   if (status >= 500) console.error('[http]', req.method, req.url, err.message);
   if (res.headersSent) return res.destroy();
   res.removeHeader('Content-Disposition');
   res.removeHeader('Content-Length');
-  res.status(status).json({ error: err.message || 'Error', code: err.code });
+  res.status(status).json({ error: err.message || 'Error', code: c, hostKey: err.hostKey });
 });
 
 // ------------------------------------------------------------ start
@@ -535,6 +543,7 @@ app.use((err, req, res, _next) => {
 function start(port = PORT, host = HOST) {
   return new Promise((resolve, reject) => {
     const server = app.listen(port, host, () => {
+      server.terminals = terminal.attach(server, { bindHost: host });
       gitSync.startWatcher();
       const url = `http://${host === '0.0.0.0' ? 'localhost' : host}:${server.address().port}`;
       console.log(`\n  FTPGit Studio running at ${url}\n  Data folder: ${DATA_DIR}\n`);

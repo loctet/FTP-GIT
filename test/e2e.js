@@ -16,6 +16,8 @@ process.env.FTPGIT_DATA = path.join(TMP, 'data');
 process.env.PORT = '4399';
 
 const FTP_PORT = 2221;
+const SFTP_PORT = 2322;
+const SFTP_ROOT = path.join(TMP, 'sftp-root');
 const APP = `http://127.0.0.1:${process.env.PORT}`;
 
 let passed = 0;
@@ -181,7 +183,7 @@ async function startFtp() {
   await step('recovers when the server drops the socket', async () => {
     const { session } = require('../server/ftpManager');
     const s = session(cid);
-    s.client.ftp.socket.destroy(); // simulate server-side disconnect
+    s.client.client.ftp.socket.destroy(); // simulate server-side disconnect
     await sleep(100);
     const r = await api('GET', `/api/ftp/${cid}/list?path=/`);
     assert(Array.isArray(r.entries), 'listing after drop');
@@ -301,6 +303,174 @@ async function startFtp() {
     assert(!fs.existsSync(hook), 'hook removed');
     assert(!fs.existsSync(path.join(process.env.FTPGIT_DATA, 'repos', rid)), 'cache removed');
   });
+  // ================================================================ SFTP / SSH
+  console.log('SFTP / SSH');
+  const { utils: sshUtils } = require('ssh2');
+  const clientKeys = sshUtils.generateKeyPairSync('ed25519');
+  const otherKeys = sshUtils.generateKeyPairSync('ed25519');
+  const KEY_FILE = path.join(TMP, 'id_ed25519');
+  fs.writeFileSync(KEY_FILE, clientKeys.private);
+  const { startSftpServer } = require('./dev-sftp');
+  const sftpSrv = await startSftpServer({ port: SFTP_PORT, root: SFTP_ROOT, user: 'deploy', password: 'ssh-pass!', publicKey: clientKeys.public });
+  const sftpConf = { name: 'Local SFTP', protocol: 'sftp', host: '127.0.0.1', port: SFTP_PORT, user: 'deploy', password: 'ssh-pass!', remoteRoot: '/' };
+  let sid;
+
+  await step('SFTP test connection returns host key fingerprint', async () => {
+    const r = await api('POST', '/api/connections/test', sftpConf);
+    assert(r.ok && r.protocol === 'sftp' && /^SHA256:/.test(r.hostKey), JSON.stringify(r));
+  });
+  await step('SFTP wrong password gives auth error (401)', async () => {
+    let msg = '';
+    try { await api('POST', '/api/connections/test', { ...sftpConf, password: 'nope' }); } catch (e) { msg = e.message; }
+    assert(/-> 401: SSH authentication failed/.test(msg), msg);
+  });
+  await step('create SFTP connection; host key trusted on first use', async () => {
+    const c = await api('POST', '/api/connections', sftpConf);
+    sid = c.id;
+    assert(c.protocol === 'sftp' && c.port === SFTP_PORT && c.hasPassword, JSON.stringify(c));
+    await api('GET', `/api/ftp/${sid}/list?path=/`);
+    const saved = db.connections.find((x) => x.id === sid);
+    assert(/^SHA256:/.test(saved.hostKey), 'hostKey stored');
+  });
+  await step('SFTP: mkdir, upload (nested), list, edit, download', async () => {
+    await api('POST', `/api/ftp/${sid}/mkdir`, { path: '/site' });
+    const fd = new FormData();
+    fd.append('relpath', 'a.txt');
+    fd.append('relpath', 'deep/er/b.bin');
+    fd.append('files', new Blob(['alpha']), 'a.txt');
+    fd.append('files', new Blob([new Uint8Array(300000).fill(9)]), 'b.bin');
+    const up = await fetch(`${APP}/api/ftp/${sid}/upload?path=/site&tid=s1`, { method: 'POST', body: fd }).then((x) => x.json());
+    assert(up.results.every((x) => x.ok), JSON.stringify(up));
+    assert(fs.statSync(path.join(SFTP_ROOT, 'site', 'deep', 'er', 'b.bin')).size === 300000, 'nested upload');
+    const l = await api('GET', `/api/ftp/${sid}/list?path=/site`);
+    const names = l.entries.map((e) => `${e.type}:${e.name}`).join(',');
+    assert(names === 'dir:deep,file:a.txt', names);
+    await fetch(`${APP}/api/ftp/${sid}/content?path=/site/a.txt`, { method: 'PUT', headers: { 'Content-Type': 'text/plain' }, body: 'beta ✓' });
+    assert((await api('GET', `/api/ftp/${sid}/content?path=/site/a.txt`)).content === 'beta ✓', 'edit');
+    const dl = await fetch(`${APP}/api/ftp/${sid}/download?path=/site/a.txt`);
+    assert(dl.ok && (await dl.text()) === 'beta ✓', 'download');
+    const missing = await fetch(`${APP}/api/ftp/${sid}/download?path=/site/missing.txt`);
+    assert(missing.status === 404 && !missing.headers.get('content-disposition'), `missing -> ${missing.status}`);
+  });
+  await step('SFTP: rename over an existing file, chmod, recursive delete', async () => {
+    await fetch(`${APP}/api/ftp/${sid}/content?path=/site/c.txt`, { method: 'PUT', headers: { 'Content-Type': 'text/plain' }, body: 'gamma' });
+    await api('POST', `/api/ftp/${sid}/rename`, { from: '/site/c.txt', to: '/site/a.txt' });
+    assert(fs.readFileSync(path.join(SFTP_ROOT, 'site', 'a.txt'), 'utf8') === 'gamma', 'overwrite rename');
+    await api('POST', `/api/ftp/${sid}/chmod`, { path: '/site/a.txt', mode: '644' });
+    const r = await api('POST', `/api/ftp/${sid}/delete`, { items: [{ path: '/site', type: 'dir' }] });
+    assert(r.results[0].ok && !fs.existsSync(path.join(SFTP_ROOT, 'site')), JSON.stringify(r));
+  });
+  await step('SSH key auth: pasted private key, key file path, wrong key rejected', async () => {
+    const base = { ...sftpConf, password: '' };
+    const r1 = await api('POST', '/api/connections/test', { ...base, privateKey: clientKeys.private });
+    assert(r1.ok, 'pasted key');
+    const r2 = await api('POST', '/api/connections/test', { ...base, keyPath: KEY_FILE });
+    assert(r2.ok, 'key file');
+    let msg = '';
+    try { await api('POST', '/api/connections/test', { ...base, privateKey: otherKeys.private }); } catch (e) { msg = e.message; }
+    assert(/401/.test(msg), `wrong key: ${msg}`);
+    const k = await api('POST', '/api/connections', { ...base, name: 'Key only', privateKey: clientKeys.private });
+    assert(k.hasPrivateKey && !k.privateKeyEnc && !k.hasPassword, 'key stored, not returned');
+    await sleep(300);
+    assert(!fs.readFileSync(path.join(process.env.FTPGIT_DATA, 'db.json'), 'utf8').includes('PRIVATE KEY'), 'private key encrypted at rest');
+    const l = await api('GET', `/api/ftp/${k.id}/list?path=/`);
+    assert(Array.isArray(l.entries), 'list with key auth');
+    await api('DELETE', `/api/connections/${k.id}`);
+  });
+  await step('changed host key is refused until trusted again', async () => {
+    const { dropSession } = require('../server/ftpManager');
+    const saved = db.connections.find((x) => x.id === sid);
+    const good = saved.hostKey;
+    saved.hostKey = 'SHA256:not-the-real-key';
+    dropSession(sid);
+    const r = await fetch(`${APP}/api/ftp/${sid}/list?path=/`);
+    const body = await r.json();
+    assert(r.status === 409 && body.code === 'HOSTKEY_MISMATCH' && body.hostKey === good, `${r.status} ${JSON.stringify(body)}`);
+    await api('PUT', `/api/connections/${sid}`, { trustNewHostKey: true });
+    await api('GET', `/api/ftp/${sid}/list?path=/`);
+    assert(db.connections.find((x) => x.id === sid).hostKey === good, 're-trusted');
+  });
+  await step('SFTP session idles out and reconnects silently', async () => {
+    db.settings.idleTimeoutMin = 0.05;
+    await api('GET', `/api/ftp/${sid}/list?path=/`);
+    await waitFor(async () => (await api('GET', '/api/state')).sessions.find((s) => s.connectionId === sid).state === 'idle', 15000, 500, 'sftp idle');
+    const r = await api('GET', `/api/ftp/${sid}/list?path=/`);
+    assert(Array.isArray(r.entries), 'reconnected');
+    db.settings.idleTimeoutMin = 10;
+  });
+  await step('SSH exec endpoint runs a command (and is refused for FTP)', async () => {
+    fs.mkdirSync(path.join(SFTP_ROOT, 'work'), { recursive: true });
+    const r = await api('POST', `/api/connections/${sid}/exec`, { command: 'echo exec-ok', cwd: '/work' });
+    assert(r.code === 0 && r.stdout.includes('exec-ok'), JSON.stringify(r));
+    let msg = '';
+    try { await api('POST', `/api/connections/${cid}/exec`, { command: 'ls' }); } catch (e) { msg = e.message; }
+    assert(/400/.test(msg), msg);
+  });
+  await step('web terminal: WebSocket SSH shell round-trip', async () => {
+    const WebSocket = require('ws');
+    const ws = new WebSocket(`ws://127.0.0.1:${process.env.PORT}/api/ssh/${sid}/shell?cols=100&rows=30&cwd=/work`, { origin: `http://127.0.0.1:${process.env.PORT}` });
+    let out = '';
+    let ready = false;
+    ws.on('message', (raw) => {
+      const m = JSON.parse(raw.toString());
+      if (m.t === 'ready') ready = true;
+      if (m.t === 'd') out += m.d;
+      if (m.t === 'err') out += `ERR:${m.msg}`;
+    });
+    await waitFor(() => ready || out.includes('ERR:'), 10000, 50, 'terminal ready');
+    assert(ready, out);
+    ws.send(JSON.stringify({ t: 'r', cols: 80, rows: 20 }));
+    ws.send(JSON.stringify({ t: 'd', d: 'echo term-e2e-ok\r' }));
+    await waitFor(() => /term-e2e-ok[\s\S]*term-e2e-ok/.test(out), 10000, 50, 'command output');
+    assert(out.includes(':/work$'), 'started in requested folder');
+    ws.close();
+  });
+  await step('web terminal refuses foreign origins and FTP connections', async () => {
+    const WebSocket = require('ws');
+    const status = await new Promise((resolve) => {
+      const ws = new WebSocket(`ws://127.0.0.1:${process.env.PORT}/api/ssh/${sid}/shell`, { origin: 'https://evil.example.com' });
+      ws.on('unexpected-response', (_req, res) => resolve(res.statusCode));
+      ws.on('open', () => resolve('opened'));
+      ws.on('error', () => {});
+    });
+    assert(status === 403, `foreign origin -> ${status}`);
+    const msg = await new Promise((resolve) => {
+      const ws = new WebSocket(`ws://127.0.0.1:${process.env.PORT}/api/ssh/${cid}/shell`);
+      ws.on('message', (raw) => resolve(JSON.parse(raw.toString())));
+      ws.on('error', () => resolve(null));
+    });
+    assert(msg && msg.t === 'err' && /SFTP\/SSH/.test(msg.msg), JSON.stringify(msg));
+  });
+  let srid;
+  await step('git deploy over SFTP + post-deploy SSH command', async () => {
+    const info = await api('POST', '/api/git/inspect', { source: WORK });
+    const r = await api('POST', '/api/repos', {
+      name: 'site-sftp', url: info.url, branch: 'main', connectionId: sid,
+      mappings: [{ local: 'dist', remote: '/www' }], excludes: '*.map', pollSec: 3600, initialDeploy: true,
+      postDeployCommand: 'echo deployed-ok> marker.txt', postDeployCwd: '/www',
+    });
+    srid = r.id;
+    const dep = await waitFor(() => db.deployments.find((d) => d.repoId === srid && d.status !== 'running'), 30000, 200, 'sftp deploy');
+    assert(dep.status === 'success', dep.log.map((l) => l.message).join('\n'));
+    assert(fs.readFileSync(path.join(SFTP_ROOT, 'www', 'index.html'), 'utf8') === '<h1>v3</h1>', 'index deployed');
+    assert(fs.existsSync(path.join(SFTP_ROOT, 'www', 'css', 'site.css')), 'nested deployed');
+    assert(fs.readFileSync(path.join(SFTP_ROOT, 'www', 'marker.txt'), 'utf8').trim() === 'deployed-ok', 'post command ran in /www');
+    assert(dep.log.some((l) => /Post-deploy command finished/.test(l.message)), 'logged');
+  });
+  await step('failing post-deploy command marks deploy "warning" but keeps files', async () => {
+    await api('PUT', `/api/repos/${srid}`, { postDeployCommand: 'echo boom 1>&2 && exit 3' });
+    write('dist/index.html', '<h1>v4</h1>');
+    git(['commit', '-am', 'v4'], WORK);
+    git(['push', 'origin', 'main'], WORK);
+    const r = await api('POST', `/api/repos/${srid}/sync`, { wait: true });
+    assert(r.deployment.status === 'warning', r.deployment.status);
+    assert(r.deployment.log.some((l) => l.level === 'warn' && /boom/.test(l.message)), 'stderr captured');
+    assert(fs.readFileSync(path.join(SFTP_ROOT, 'www', 'index.html'), 'utf8') === '<h1>v4</h1>', 'files still deployed');
+    const repo = await api('GET', `/api/repos/${srid}`);
+    assert(repo.lastDeployedSha === git(['rev-parse', 'HEAD'], WORK) && repo.status === 'warning', `${repo.status}`);
+    await api('DELETE', `/api/repos/${srid}`);
+  });
+
   await step('UI is served', async () => {
     const html = await fetch(APP + '/').then((r) => r.text());
     assert(html.includes('FTPGit Studio') && html.includes('/js/app.js'), 'index.html');
@@ -319,6 +489,7 @@ async function startFtp() {
   server.close();
   server.closeAllConnections && server.closeAllConnections();
   await ftpSrv.close().catch(() => {});
+  sftpSrv.close();
   try { fs.rmSync(TMP, { recursive: true, force: true }); } catch {}
   process.exit(failed ? 1 : 0);
 })().catch((e) => {

@@ -1,13 +1,13 @@
 'use strict';
-// FTP session manager.
+// Remote session manager (FTP, FTPS and SFTP).
 //  - One persistent session per saved connection, used by the file explorer.
-//  - Operations are serialized through a queue (FTP control connections are single-threaded).
+//  - Operations are serialized through a queue (one control channel per session).
 //  - After N minutes without user activity the socket is closed ("idle"), but the stored
 //    credentials are kept, so the next operation silently reconnects. No re-login needed.
-//  - While active, a NOOP keep-alive prevents the server from dropping us earlier.
-const ftp = require('basic-ftp');
-const { db, decrypt } = require('./store');
+//  - While active, a keep-alive (NOOP / SFTP realpath) prevents the server from dropping us earlier.
+const { db, save } = require('./store');
 const { broadcast, activity } = require('./events');
+const { createRemote, defaultPort } = require('./remote');
 
 function getConnection(connectionId) {
   const conn = db.connections.find((c) => c.id === connectionId);
@@ -19,27 +19,19 @@ function getConnection(connectionId) {
   return conn;
 }
 
-function accessOptions(conn) {
-  const secure = conn.secure === 'explicit' ? true : conn.secure === 'implicit' ? 'implicit' : false;
-  return {
-    host: conn.host,
-    port: Number(conn.port) || (conn.secure === 'implicit' ? 990 : 21),
-    user: conn.user || 'anonymous',
-    password: conn.passwordEnc ? decrypt(conn.passwordEnc) : (conn.user ? '' : 'guest'),
-    secure,
-    secureOptions: secure ? { rejectUnauthorized: !conn.allowSelfSigned } : undefined,
-  };
-}
-
-async function openClient(conn, timeout = 30000) {
-  const client = new ftp.Client(timeout);
-  client.ftp.verbose = false;
-  if (conn.encoding) client.ftp.encoding = conn.encoding;
+/** Connects with the right protocol adapter. Records the SSH host key on first use (trust on first use). */
+async function openClient(conn, timeout = 30000, opts = {}) {
+  const client = createRemote(conn, timeout);
   try {
-    await client.access(accessOptions(conn));
+    await client.connect(opts);
   } catch (e) {
     client.close();
     throw friendlyError(e, conn);
+  }
+  if (client.hostKey && !conn.hostKey && db.connections.includes(conn)) {
+    conn.hostKey = client.hostKey;
+    save();
+    activity('info', 'ftp', `Trusted SSH host key for ${conn.name || conn.host}: ${client.hostKey}`, { connectionId: conn.id });
   }
   return client;
 }
@@ -47,12 +39,13 @@ async function openClient(conn, timeout = 30000) {
 function friendlyError(e, conn) {
   if (!e || e.__friendly) return e;
   let msg = e.message || String(e);
-  if (e.code === 'ECONNREFUSED') msg = `Connection refused by ${conn.host}:${conn.port || 21}`;
+  const port = conn.port || defaultPort(conn);
+  if (e.code === 'ECONNREFUSED') msg = `Connection refused by ${conn.host}:${port}`;
   else if (e.code === 'ENOTFOUND') msg = `Host not found: ${conn.host}`;
-  else if (e.code === 'ETIMEDOUT' || /timeout/i.test(msg)) msg = `Timed out talking to ${conn.host}`;
+  else if (e.code === 'ETIMEDOUT' || /timed? ?out/i.test(msg)) msg = `Timed out talking to ${conn.host}:${port}`;
   else if (e.code === 530) msg = 'Login incorrect (530). Check the username and password.';
   const err = new Error(msg);
-  err.code = e.code;
+  for (const k of ['code', 'notFound', 'hostKey']) if (e[k] !== undefined) err[k] = e[k];
   err.__friendly = true;
   return err;
 }
@@ -61,10 +54,10 @@ function isConnectionError(err, client) {
   if (client && client.closed) return true;
   if (!err) return false;
   if (err.code === 421) return true;
-  return /ECONNRESET|EPIPE|closed|timeout|not connected|socket/i.test(`${err.code || ''} ${err.message || ''}`);
+  return /ECONNRESET|EPIPE|closed|timeout|not connected|socket|No response from server/i.test(`${err.code || ''} ${err.message || ''}`);
 }
 
-/** Opens a dedicated short-lived client (used by deployments so they don't block browsing). */
+/** Opens a dedicated short-lived client (used by transfers and deployments so they don't block browsing). */
 async function withClient(connectionId, fn) {
   const conn = getConnection(connectionId);
   const client = await openClient(conn, 60000);
@@ -196,7 +189,7 @@ class Session {
     const keepAliveMs = (Number(db.settings.keepAliveSec) || 60) * 1000;
     if (now - this.lastNoop >= keepAliveMs) {
       this.lastNoop = now;
-      this.run((c) => c.send('NOOP'), { activity: false, retry: false }).catch(() => {});
+      this.run((c) => c.noop(), { activity: false, retry: false }).catch(() => {});
     }
   }
 }
@@ -235,4 +228,4 @@ const ticker = setInterval(() => {
 }, 2000);
 ticker.unref();
 
-module.exports = { session, dropSession, allStatuses, withClient, openClient, getConnection, accessOptions, friendlyError };
+module.exports = { session, dropSession, allStatuses, withClient, openClient, getConnection, friendlyError };
