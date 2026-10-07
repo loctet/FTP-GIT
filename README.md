@@ -53,7 +53,7 @@ To start without opening a browser, run `npm run serve`. To use another port, se
 
 ## Use
 
-1. Click **+** next to *Connections*. Choose **SFTP — SSH File Transfer** for SSH credentials, or one of the FTP options. Enter the host, port, user and password, or a private key. Click **Test connection**, then **Save**.
+1. Click **+** next to *Connections* and pick the connection type. **SSH** is the default. If you only have a host, a user and a password, fill in those three fields. You can also paste `user@host:port` into *Host*, and the app splits it into the right fields for you. Click **Test connection**, then **Save**. An SSH key is optional; it is under *Use an SSH key instead of a password*.
 2. Browse and manage files in **File Explorer**. Drag files from your desktop into the window to upload them. For SFTP, click **Terminal** in the header to open a shell.
 3. Open **Git Deploy** and click **Add repository**:
    - Enter your project folder, for example `D:\Projects\my-site`. You can also enter a remote URL. Click **Inspect**.

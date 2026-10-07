@@ -226,5 +226,9 @@ module.exports = { startSftpServer };
 
 if (require.main === module) {
   const root = path.resolve(process.argv[2] || path.join(__dirname, '..', 'data', 'dev-sftp-root'));
-  startSftpServer({ root }).then(() => console.log(`Dev SFTP/SSH server on sftp://127.0.0.1:2222  (user: demo / pass: demo)\nRoot: ${root}`));
+  // Keep the same host key across restarts, like a real server (otherwise the app warns that the key changed).
+  const keyFile = path.join(__dirname, '..', 'data', 'dev-sftp-hostkey');
+  fs.mkdirSync(path.dirname(keyFile), { recursive: true });
+  if (!fs.existsSync(keyFile)) fs.writeFileSync(keyFile, utils.generateKeyPairSync('ed25519').private, { mode: 0o600 });
+  startSftpServer({ root, hostKey: fs.readFileSync(keyFile, 'utf8') }).then(() => console.log(`Dev SFTP/SSH server on sftp://127.0.0.1:2222  (user: demo / pass: demo)\nRoot: ${root}`));
 }

@@ -55,7 +55,9 @@ function publicConnection(c) {
 }
 
 function connectionFromBody(body, existing = {}) {
-  const protocol = body.protocol === 'sftp' || (body.protocol === undefined && existing.protocol === 'sftp') ? 'sftp' : 'ftp';
+  // "ssh" is accepted as an alias: SSH connections use SFTP for files and SSH for the terminal.
+  const asked = body.protocol === 'ssh' ? 'sftp' : body.protocol;
+  const protocol = asked === 'sftp' || (asked === undefined && existing.protocol === 'sftp') ? 'sftp' : 'ftp';
   const host = String(body.host ?? existing.host ?? '').trim().replace(/^(s?ftps?|ssh):\/\//i, '').replace(/\/.*$/, '');
   if (!host) throw httpError(400, 'Host is required');
   const secure = protocol === 'sftp' ? 'none' : ['none', 'explicit', 'implicit'].includes(body.secure) ? body.secure : existing.secure || 'none';
@@ -181,7 +183,7 @@ app.post('/api/connections/:id/connect', wrap(async (req, res) => {
 // Run one SSH command (SFTP connections only). Used by "Run command" and handy for scripts.
 app.post('/api/connections/:id/exec', wrap(async (req, res) => {
   const conn = ftpm.getConnection(req.params.id);
-  if (!isSftp(conn)) throw httpError(400, 'Commands need an SFTP/SSH connection.');
+  if (!isSftp(conn)) throw httpError(400, 'Commands need an SSH connection.');
   const command = String(req.body?.command || '').trim();
   if (!command) throw httpError(400, 'Command is required');
   const cwd = req.body?.cwd ? remotePath(req.body.cwd) : null;

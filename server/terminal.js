@@ -75,7 +75,7 @@ function attach(server, { bindHost }) {
     let conn;
     try {
       conn = ftpm.getConnection(connectionId);
-      if (!isSftp(conn)) throw new Error('The terminal needs an SFTP/SSH connection. FTP servers cannot run commands.');
+      if (!isSftp(conn)) throw new Error('The terminal needs an SSH connection. FTP servers cannot run commands.');
       client = await ftpm.openClient(conn, 20000, { sftp: false });
       stream = await client.shell({ cols, rows });
     } catch (e) {

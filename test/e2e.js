@@ -332,6 +332,13 @@ async function startFtp() {
     const saved = db.connections.find((x) => x.id === sid);
     assert(/^SHA256:/.test(saved.hostKey), 'hostKey stored');
   });
+  await step('"ssh" connection type with just host, user and password', async () => {
+    const c = await api('POST', '/api/connections', { protocol: 'ssh', host: '127.0.0.1', port: SFTP_PORT, user: 'deploy', password: 'ssh-pass!' });
+    assert(c.protocol === 'sftp' && c.name === '127.0.0.1' && c.port === SFTP_PORT, JSON.stringify(c));
+    const l = await api('GET', `/api/ftp/${c.id}/list?path=/`);
+    assert(Array.isArray(l.entries), 'list');
+    await api('DELETE', `/api/connections/${c.id}`);
+  });
   await step('SFTP: mkdir, upload (nested), list, edit, download', async () => {
     await api('POST', `/api/ftp/${sid}/mkdir`, { path: '/site' });
     const fd = new FormData();
@@ -439,7 +446,7 @@ async function startFtp() {
       ws.on('message', (raw) => resolve(JSON.parse(raw.toString())));
       ws.on('error', () => resolve(null));
     });
-    assert(msg && msg.t === 'err' && /SFTP\/SSH/.test(msg.msg), JSON.stringify(msg));
+    assert(msg && msg.t === 'err' && /SSH connection/.test(msg.msg), JSON.stringify(msg));
   });
   let srid;
   await step('git deploy over SFTP + post-deploy SSH command', async () => {

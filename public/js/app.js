@@ -442,11 +442,15 @@
       }
       case 'connecting': text = 'Connecting…'; break;
       case 'idle': text = 'Sleeping (idle) · reconnects on demand'; break;
-      case 'error': text = `Error · ${s.error || 'connection failed'}`; break;
+      case 'error': {
+        const msg = String(s.error || 'connection failed').split(/\.\s/)[0];
+        text = `Error · ${msg.length > 48 ? msg.slice(0, 47) + '…' : msg}`;
+        break;
+      }
       default: text = 'Not connected · connects on demand'; dot = 'disconnected';
     }
     setKids(pill, h('span', { class: `dot ${dot}` }), text);
-    pill.title = s.state === 'connected' ? 'The FTP socket is closed after the idle timeout. Your saved credentials are reused automatically — no need to log in again.' : '';
+    pill.title = s.state === 'connected' ? 'The connection is closed after the idle timeout. Your saved credentials are reused automatically — no need to log in again.' : s.state === 'error' ? s.error || '' : '';
   }
 
   function renderContent() {
@@ -502,23 +506,29 @@
   }
 
   const PROTOCOLS = [
-    { v: 'sftp', label: 'SFTP — SSH File Transfer', port: 22 },
-    { v: 'ftp', label: 'FTP (plain)', port: 21 },
+    { v: 'sftp', label: 'SSH', port: 22 },
+    { v: 'ftp', label: 'FTP', port: 21 },
     { v: 'ftps-explicit', label: 'FTPS — explicit TLS', port: 21 },
     { v: 'ftps-implicit', label: 'FTPS — implicit TLS', port: 990 },
   ];
+  const CONN_TYPES = [
+    { v: 'sftp', label: 'SSH', icon: 'terminal', sub: 'Host, user & password · files (SFTP) + terminal' },
+    { v: 'ftp', label: 'FTP', icon: 'server', sub: 'Classic FTP, unencrypted' },
+    { v: 'ftps', label: 'FTPS', icon: 'shield', sub: 'FTP over TLS' },
+  ];
   const protoKey = (c) => (c.protocol === 'sftp' ? 'sftp' : c.secure === 'explicit' ? 'ftps-explicit' : c.secure === 'implicit' ? 'ftps-implicit' : 'ftp');
-  const protoLabel = (c) => ({ sftp: 'SFTP (SSH)', ftp: 'FTP', 'ftps-explicit': 'FTPS (TLS)', 'ftps-implicit': 'FTPS (implicit)' }[protoKey(c)]);
+  const protoLabel = (c) => ({ sftp: 'SSH', ftp: 'FTP', 'ftps-explicit': 'FTPS (TLS)', 'ftps-implicit': 'FTPS (implicit)' }[protoKey(c)]);
   const isSftpConn = (c) => !!c && c.protocol === 'sftp';
 
   function openConnectionForm(existing) {
     const isEdit = !!(existing && existing.id);
     const e = existing || {};
     let trustNewHostKey = false;
+    let proto = isEdit || e.protocol ? protoKey(e) : 'sftp';
     const f = {
-      name: h('input', { class: 'input', value: e.name || '', placeholder: 'My website' }),
-      proto: h('select', { class: 'select' }, PROTOCOLS.map((p) => h('option', { value: p.v }, p.label))),
-      host: h('input', { class: 'input mono', value: e.host || '', placeholder: 'example.com', spellcheck: 'false' }),
+      name: h('input', { class: 'input', value: e.name || '', placeholder: '(optional) e.g. My website — defaults to the host' }),
+      ftpsMode: h('select', { class: 'select' }, h('option', { value: 'ftps-explicit' }, 'Explicit TLS (port 21, most common)'), h('option', { value: 'ftps-implicit' }, 'Implicit TLS (port 990)')),
+      host: h('input', { class: 'input mono', value: e.host || '', placeholder: 'server.example.com  or  user@1.2.3.4:22', spellcheck: 'false', autofocus: true }),
       port: h('input', { class: 'input mono', type: 'number', value: e.port || 22, min: 1, max: 65535 }),
       user: h('input', { class: 'input mono', value: e.user || '', placeholder: 'username', autocomplete: 'off', spellcheck: 'false' }),
       password: h('input', { class: 'input mono', type: 'password', placeholder: isEdit && e.hasPassword ? '•••••••• (saved — leave empty to keep)' : 'password', autocomplete: 'new-password' }),
@@ -530,37 +540,70 @@
       useAgent: h('input', { type: 'checkbox', checked: !!e.useAgent }),
       clearKey: h('input', { type: 'checkbox' }),
     };
-    f.proto.value = isEdit || e.protocol ? protoKey(e) : 'sftp';
+    if (proto.startsWith('ftps')) f.ftpsMode.value = proto;
     if (!isEdit && !e.port) f.port.value = 22;
-    let lastProto = f.proto.value;
+    let lastProto = proto;
+
+    // Paste "user@host:port" (or ssh://user@host:port) into Host and the fields fill themselves.
+    const parseHost = () => {
+      const m = /^(?:(ssh|sftp|ftps?):\/\/)?(?:([^@\s/]+)@)?([^:@\s/]+)(?::(\d+))?\/?$/i.exec(f.host.value.trim());
+      if (!m || (!m[1] && !m[2] && !m[4])) return;
+      const scheme = (m[1] || '').toLowerCase();
+      if (scheme === 'ssh' || scheme === 'sftp') setProto('sftp');
+      else if (scheme === 'ftps') setProto(f.ftpsMode.value);
+      else if (scheme === 'ftp') setProto('ftp');
+      f.host.value = m[3];
+      if (m[2]) f.user.value = decodeURIComponent(m[2]);
+      if (m[4]) f.port.value = m[4];
+      if (m[2] && !f.password.value) f.password.focus();
+    };
+    f.host.addEventListener('blur', parseHost);
+    f.host.addEventListener('paste', () => setTimeout(parseHost, 0));
+
+    const typeCards = h('div', { class: 'type-cards', role: 'radiogroup', 'aria-label': 'Connection type' });
+    const renderTypeCards = () => setKids(typeCards, CONN_TYPES.map((t) => {
+      const active = t.v === 'ftps' ? proto.startsWith('ftps') : proto === t.v;
+      return h('button', { type: 'button', role: 'radio', 'aria-checked': active ? 'true' : 'false', class: `type-card ${active ? 'active' : ''}`, onclick: () => setProto(t.v === 'ftps' ? f.ftpsMode.value : t.v) },
+        h('span', { class: 'tc-icon' }, icon(t.icon)),
+        h('span', { class: 'tc-text' }, h('b', null, t.label), h('span', null, t.sub)),
+        active ? h('span', { class: 'tc-check' }, icon('check')) : null);
+    }));
+
     const pwLabel = h('label', null, 'Password');
+    const keyDetails = h('details', { class: 'key-details', open: !!(e.hasPrivateKey || e.keyPath || e.useAgent) || undefined },
+      h('summary', null, icon('key'), 'Use an SSH key instead of a password', h('span', { class: 'hint' }, ' — optional')),
+      h('div', { class: 'stack', style: { marginTop: '12px' } },
+        h('div', { class: 'field' }, h('label', null, 'Private key (paste)'), f.privateKey,
+          e.hasPrivateKey ? h('label', { class: 'check', style: { marginTop: '4px' } }, f.clearKey, h('span', null, 'Remove the saved private key')) : null),
+        h('div', { class: 'grid-2' },
+          h('div', { class: 'field' }, h('label', null, '…or private key file on this computer'), f.keyPath),
+          h('div', { class: 'field' }, h('label', null, 'Key passphrase'), f.passphrase)),
+        h('label', { class: 'check' }, f.useAgent, h('span', null, 'Use my SSH agent', h('div', { class: 'hint' }, 'Windows OpenSSH agent, or SSH_AUTH_SOCK on macOS/Linux.')))));
     const sshBox = h('div', { class: 'stack' },
-      h('div', { class: 'section-title', style: { margin: '4px 0 0' } }, icon('key'), h('h2', null, 'SSH key authentication'), h('span', { class: 'hint' }, 'optional — use instead of, or with, the password')),
-      h('div', { class: 'field' }, h('label', null, 'Private key (paste)'), f.privateKey,
-        e.hasPrivateKey ? h('label', { class: 'check', style: { marginTop: '4px' } }, f.clearKey, h('span', null, 'Remove the saved private key')) : null),
-      h('div', { class: 'grid-2' },
-        h('div', { class: 'field' }, h('label', null, '…or private key file on this computer'), f.keyPath),
-        h('div', { class: 'field' }, h('label', null, 'Key passphrase'), f.passphrase)),
-      h('label', { class: 'check' }, f.useAgent, h('span', null, 'Use my SSH agent', h('div', { class: 'hint' }, 'Windows OpenSSH agent / Pageant-compatible pipe, or SSH_AUTH_SOCK on macOS/Linux.'))),
+      keyDetails,
       isEdit && e.hostKey ? h('div', { class: 'callout' }, icon('shield'), h('div', null, 'Trusted server host key: ', h('code', null, e.hostKey), h('div', { class: 'hint' }, 'Learned on first connection. If it ever changes you will be warned before anything is sent.'))) : null);
-    const ftpsBox = h('label', { class: 'check' }, f.allowSelfSigned, h('span', null, 'Accept self-signed / invalid TLS certificates', h('div', { class: 'hint' }, 'Only for FTPS servers using their own certificate.')));
-    const syncProto = () => {
-      const p = f.proto.value;
+    const ftpsBox = h('div', { class: 'stack' },
+      h('div', { class: 'field' }, h('label', null, 'TLS mode'), f.ftpsMode),
+      h('label', { class: 'check' }, f.allowSelfSigned, h('span', null, 'Accept self-signed / invalid TLS certificates', h('div', { class: 'hint' }, 'Only for FTPS servers using their own certificate.'))));
+    f.ftpsMode.addEventListener('change', () => setProto(f.ftpsMode.value));
+
+    function setProto(p) {
+      proto = p;
       const def = PROTOCOLS.find((x) => x.v === p).port;
       const oldDef = PROTOCOLS.find((x) => x.v === lastProto).port;
       if (!f.port.value || Number(f.port.value) === oldDef) f.port.value = def;
       lastProto = p;
       sshBox.style.display = p === 'sftp' ? '' : 'none';
       ftpsBox.style.display = p.startsWith('ftps') ? '' : 'none';
-      pwLabel.textContent = p === 'sftp' ? 'Password (SSH)' : 'Password';
-      f.host.placeholder = p === 'sftp' ? 'server.example.com' : 'ftp.example.com';
-    };
-    f.proto.addEventListener('change', syncProto);
-    syncProto();
+      pwLabel.textContent = p === 'sftp' ? 'SSH password' : 'Password';
+      f.host.placeholder = p === 'sftp' ? 'server.example.com  or  user@1.2.3.4:22' : 'ftp.example.com';
+      renderTypeCards();
+    }
+    setProto(proto);
 
     const result = h('div');
     const data = () => {
-      const p = f.proto.value;
+      const p = proto;
       const d = {
         id: isEdit ? e.id : undefined,
         name: f.name.value, host: f.host.value, port: f.port.value, user: f.user.value,
@@ -578,6 +621,7 @@
       return d;
     };
     const runTest = async () => {
+      parseHost();
       testBtn.disabled = true;
       setKids(result, h('div', { class: 'callout' }, icon('loader', 'spin'), 'Connecting…'));
       try {
@@ -595,6 +639,7 @@
     };
     const testBtn = btn('Test connection', 'zap', runTest);
     const saveBtn = btn(isEdit ? 'Save changes' : 'Save connection', 'check', async () => {
+      parseHost();
       saveBtn.disabled = true;
       try {
         const body = data();
@@ -612,18 +657,18 @@
       iconName: 'server',
       size: 'wide',
       body: h('form', { class: 'stack', onsubmit: (ev) => { ev.preventDefault(); saveBtn.click(); } },
-        h('div', { class: 'grid-2' },
-          h('div', { class: 'field' }, h('label', null, 'Display name'), f.name),
-          h('div', { class: 'field' }, h('label', null, 'Protocol'), f.proto)),
-        h('div', { class: 'grid-3' },
+        h('div', { class: 'field' }, h('label', null, 'Connection type'), typeCards),
+        h('div', { class: 'grid-host' },
           h('div', { class: 'field' }, h('label', null, 'Host'), f.host),
-          h('div', { class: 'field' }, h('label', null, 'Port'), f.port),
-          h('div', { class: 'field' }, h('label', null, 'Start folder'), f.remoteRoot)),
+          h('div', { class: 'field' }, h('label', null, 'Port'), f.port)),
         h('div', { class: 'grid-2' },
           h('div', { class: 'field' }, h('label', null, 'Username'), f.user),
           h('div', { class: 'field' }, pwLabel, f.password)),
         sshBox,
         ftpsBox,
+        h('div', { class: 'grid-2' },
+          h('div', { class: 'field' }, h('label', null, 'Display name'), f.name),
+          h('div', { class: 'field' }, h('label', null, 'Start folder'), f.remoteRoot)),
         h('div', { class: 'callout' }, icon('lock'), h('div', null, 'Passwords and keys are encrypted (AES-256-GCM) and stored only on this computer. The app reconnects with them automatically, so you never log in again after an idle disconnect.')),
         result,
         h('button', { type: 'submit', hidden: true })
@@ -663,7 +708,7 @@
   async function openTerminal(cid = S.activeConn, cwd = null) {
     const c = conn(cid);
     if (!c) return;
-    if (!isSftpConn(c)) { toast('warn', 'Terminal needs SSH', 'Edit this connection and choose SFTP — FTP servers cannot run commands.'); return; }
+    if (!isSftpConn(c)) { toast('warn', 'Terminal needs SSH', 'Edit this connection and choose SSH — FTP servers cannot run commands.'); return; }
     try { await loadXterm(); } catch (e) { toast('error', 'Terminal unavailable', e.message); return; }
     const term = new window.Terminal({ fontFamily: getComputedStyle(document.body).getPropertyValue('--mono') || 'monospace', fontSize: 13, lineHeight: 1.2, cursorBlink: true, scrollback: 10000, theme: TERM_THEME, allowProposedApi: false });
     const fit = new window.FitAddon.FitAddon();
@@ -923,6 +968,7 @@
       ex.path = r.path;
       ex.entries = r.entries;
       ex.error = null;
+      ex.errorCode = null;
       if (changed) { ex.selected.clear(); ex.anchor = null; }
       else { const names = new Set(r.entries.map((x) => x.path)); for (const s of [...ex.selected]) if (!names.has(s)) ex.selected.delete(s); }
       LS.set(`path.${c.id}`, ex.path);
@@ -930,8 +976,10 @@
       if (req !== ex.reqId) return;
       if (opts.fallback && opts.fallback !== p) return loadDir(opts.fallback);
       ex.error = e.message;
+      ex.errorCode = e.code || null;
       if (ex.path === null) ex.path = p || '/';
-      toast('error', 'Could not open folder', e.message);
+      if (e.code === 'HOSTKEY_MISMATCH') ex.entries = []; // never show stale files from an unverified server
+      else toast('error', 'Could not open folder', e.message);
     } finally {
       if (req === ex.reqId) {
         ex.loading = false;
@@ -940,6 +988,25 @@
         if (S.view === 'explorer') { renderCrumbs(); renderFileTable(); updateNavButtons(); }
       }
     }
+  }
+
+  async function trustNewKey() {
+    const c = conn();
+    if (!c) return;
+    const ok = await confirmDialog({
+      title: 'Trust the new host key?',
+      iconName: 'shield',
+      message: h('div', null,
+        h('p', { style: { marginTop: 0 } }, `${c.host} is presenting a different SSH host key than the one saved on first connection.`),
+        h('p', null, 'This is expected after a server reinstall or migration. If you did not expect a change, ask your host before continuing — someone could be intercepting the connection.')),
+      confirmText: 'Trust new key',
+    });
+    if (!ok) return;
+    try {
+      await api('PUT', `/api/connections/${c.id}`, { trustNewHostKey: true });
+      toast('success', 'New host key trusted');
+      loadDir(S.ex.path);
+    } catch (e) { toast('error', 'Failed', e.message); }
   }
 
   function updateNavButtons() {
@@ -978,7 +1045,14 @@
     const list = visibleEntries();
     renderStatusbar(list);
     if (ex.error && !ex.entries.length) {
-      setKids(host, h('div', { class: 'empty' }, h('div', null, h('div', { class: 'big', style: { background: 'var(--danger-soft)', color: 'var(--danger)' } }, icon('alert')), h('h3', null, 'Could not load this folder'), h('p', null, ex.error), btn('Try again', 'refresh', () => loadDir(ex.path), 'primary'))));
+      const keyChanged = ex.errorCode === 'HOSTKEY_MISMATCH';
+      setKids(host, h('div', { class: 'empty' }, h('div', null,
+        h('div', { class: 'big', style: { background: 'var(--danger-soft)', color: 'var(--danger)' } }, icon(keyChanged ? 'shield' : 'alert')),
+        h('h3', null, keyChanged ? 'The server identity changed' : 'Could not load this folder'),
+        h('p', null, ex.error),
+        h('div', { class: 'row', style: { justifyContent: 'center' } },
+          btn('Try again', 'refresh', () => loadDir(ex.path), keyChanged ? '' : 'primary'),
+          keyChanged ? btn('Trust new host key', 'shield', trustNewKey, 'danger') : null))));
       return;
     }
     if (ex.path === null) { setKids(host, h('div', { class: 'empty' }, h('div', null, icon('loader', 'spin'), h('p', null, 'Connecting…')))); return; }
@@ -1656,7 +1730,7 @@
       const c = conn(f.connectionId.value);
       cmdHint.textContent = isSftpConn(c)
         ? 'Runs over SSH after the files are uploaded. Output appears in the deployment log; a non-zero exit marks the deploy "Cmd failed".'
-        : 'Only available for SFTP/SSH connections — FTP cannot run commands. It will be skipped for this connection.';
+        : 'Only available for SSH connections — FTP cannot run commands. It will be skipped for this connection.';
     };
     f.connectionId.addEventListener('change', syncCmdHint);
     syncCmdHint();

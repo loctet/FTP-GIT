@@ -155,7 +155,7 @@ class FtpRemote {
   }
 
   async exec() {
-    throw new Error('Commands need an SFTP/SSH connection; FTP cannot run commands.');
+    throw new Error('Commands need an SSH connection; FTP cannot run commands.');
   }
 }
 

@@ -330,7 +330,7 @@ async function deploy(repo, sha, { full = false, trigger = 'manual' } = {}) {
 
     const command = String(repo.postDeployCommand || '').trim();
     const canExec = isSftp(getConnection(repo.connectionId));
-    if (command && !canExec) logDep(dep, 'warn', 'Post-deploy command skipped: the connection is FTP, which cannot run commands (use SFTP/SSH).');
+    if (command && !canExec) logDep(dep, 'warn', 'Post-deploy command skipped: the connection is FTP, which cannot run commands (use an SSH connection).');
     if (ops.length || (command && canExec)) {
       await withClient(repo.connectionId, async (client) => {
         const madeDirs = new Set();
