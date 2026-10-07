@@ -117,6 +117,35 @@ app.put('/api/settings', (req, res) => {
   res.json(db.settings);
 });
 
+// Connections saved before SSH support had no protocol field. Port 22 is SSH in practice,
+// so upgrade those instead of letting FTP hang on an SSH port.
+for (const c of db.connections) {
+  if (c.protocol) continue;
+  c.protocol = Number(c.port) === 22 ? 'sftp' : 'ftp';
+  if (c.protocol === 'sftp') {
+    c.secure = 'none';
+    events.activity('info', 'app', `Connection "${c.name}" uses port 22, so it was switched to SSH`);
+  }
+  save();
+}
+
+// Detects "code updated on disk but the running server is still the old one".
+const crypto = require('crypto');
+function codeHash() {
+  const h = crypto.createHash('sha1');
+  const dir = __dirname;
+  for (const f of fs.readdirSync(dir).filter((x) => x.endsWith('.js')).sort()) h.update(f).update(fs.readFileSync(path.join(dir, f)));
+  h.update(fs.readFileSync(path.join(dir, '..', 'package.json')));
+  return h.digest('hex');
+}
+const STARTED_HASH = codeHash();
+const STARTED_AT = new Date().toISOString();
+app.get('/api/version', (req, res) => {
+  let restartNeeded = false;
+  try { restartNeeded = codeHash() !== STARTED_HASH; } catch {}
+  res.json({ version: require('../package.json').version, startedAt: STARTED_AT, restartNeeded });
+});
+
 app.get('/api/activity', (req, res) => res.json(db.activity.slice(-500).reverse()));
 app.delete('/api/activity', (req, res) => {
   db.activity.length = 0;
@@ -531,6 +560,7 @@ app.use((err, req, res, _next) => {
       : err.notFound || c === 550 ? 404
         : c === 3 ? 403
           : c === 'HOSTKEY_MISMATCH' ? 409
+            : c === 'WRONG_PROTOCOL' ? 400
             : typeof c === 'number' ? 400
               : /^E[A-Z]+/.test(String(c || '')) ? 502 : 500);
   if (status >= 500) console.error('[http]', req.method, req.url, err.message);
@@ -556,6 +586,10 @@ function start(port = PORT, host = HOST) {
       }
       resolve(server);
     });
+    // Longer than clients' idle-socket reuse window, so a reused keep-alive socket is never
+    // closed under an in-flight request ("fetch failed" / ECONNRESET races).
+    server.keepAliveTimeout = 65000;
+    server.headersTimeout = 66000;
     server.on('error', reject);
   });
 }

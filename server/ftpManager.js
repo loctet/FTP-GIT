@@ -7,7 +7,7 @@
 //  - While active, a keep-alive (NOOP / SFTP realpath) prevents the server from dropping us earlier.
 const { db, save } = require('./store');
 const { broadcast, activity } = require('./events');
-const { createRemote, defaultPort } = require('./remote');
+const { createRemote, defaultPort, isSftp, readBanner } = require('./remote');
 
 function getConnection(connectionId) {
   const conn = db.connections.find((c) => c.id === connectionId);
@@ -22,11 +22,30 @@ function getConnection(connectionId) {
 /** Connects with the right protocol adapter. Records the SSH host key on first use (trust on first use). */
 async function openClient(conn, timeout = 30000, opts = {}) {
   const client = createRemote(conn, timeout);
+  const port = Number(conn.port) || defaultPort(conn);
+  // FTP pointed at an SSH port (or the reverse) just hangs until the timeout, because each side
+  // waits for a greeting the other never sends. If login is slow, peek at the server banner and
+  // fail fast with a clear message instead.
+  let wrongProtocol = null;
+  const checkBanner = async () => {
+    const banner = (await readBanner(conn.host, port, 3000)).trim();
+    if (isSftp(conn) && /^220[ -]/.test(banner)) {
+      wrongProtocol = `${conn.host}:${port} is an FTP server ("${banner.slice(0, 60)}"), not SSH. Choose the FTP or FTPS connection type, or use the SSH port (usually 22).`;
+    } else if (!isSftp(conn) && /^SSH-/.test(banner)) {
+      wrongProtocol = `${conn.host}:${port} is an SSH server ("${banner.slice(0, 60)}"), not FTP. Edit the connection and choose the SSH connection type.`;
+    }
+    return !!wrongProtocol;
+  };
+  const probe = setTimeout(() => { checkBanner().then((bad) => bad && client.close()).catch(() => {}); }, 3000);
   try {
     await client.connect(opts);
   } catch (e) {
     client.close();
+    if (!wrongProtocol && /timed? ?out|handshake|closed/i.test(`${e.code || ''} ${e.message || ''}`)) await checkBanner().catch(() => {});
+    if (wrongProtocol) throw friendlyError(Object.assign(new Error(wrongProtocol), { code: 'WRONG_PROTOCOL' }), conn);
     throw friendlyError(e, conn);
+  } finally {
+    clearTimeout(probe);
   }
   if (client.hostKey && !conn.hostKey && db.connections.includes(conn)) {
     conn.hostKey = client.hostKey;

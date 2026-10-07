@@ -88,6 +88,9 @@ async function startFtp() {
 (async () => {
   console.log(`\nFTPGit Studio e2e — temp: ${TMP}\n`);
   const ftpSrv = await startFtp();
+  // A connection saved by the pre-SSH version (no protocol field) on port 22.
+  fs.mkdirSync(process.env.FTPGIT_DATA, { recursive: true });
+  fs.writeFileSync(path.join(process.env.FTPGIT_DATA, 'db.json'), JSON.stringify({ connections: [{ id: 'con_legacy', name: 'Legacy', host: '127.0.0.1', port: 22, user: 'x', secure: 'none', remoteRoot: '/' }] }));
   const { start } = require('../server/index');
   const server = await start(Number(process.env.PORT), '127.0.0.1');
   const { db } = require('../server/store');
@@ -96,6 +99,11 @@ async function startFtp() {
   const ftpConf = { name: 'Local test FTP', host: '127.0.0.1', port: FTP_PORT, user: 'tester', password: 's3cret!', secure: 'none', remoteRoot: '/' };
 
   console.log('FTP connections');
+  await step('legacy port-22 connection is migrated to SSH on startup', async () => {
+    const c = db.connections.find((x) => x.id === 'con_legacy');
+    assert(c && c.protocol === 'sftp', JSON.stringify(c));
+    db.connections.splice(db.connections.indexOf(c), 1);
+  });
   await step('rejects wrong password with friendly error', async () => {
     let msg = '';
     try { await api('POST', '/api/connections/test', { ...ftpConf, password: 'nope' }); } catch (e) { msg = e.message; }
@@ -332,6 +340,16 @@ async function startFtp() {
     const saved = db.connections.find((x) => x.id === sid);
     assert(/^SHA256:/.test(saved.hostKey), 'hostKey stored');
   });
+  await step('wrong protocol for the port is detected fast with a clear message', async () => {
+    const t0 = Date.now();
+    let msg = '';
+    try { await api('POST', '/api/connections/test', { protocol: 'ftp', host: '127.0.0.1', port: SFTP_PORT, user: 'deploy', password: 'x' }); } catch (e) { msg = e.message; }
+    assert(/-> 400: .*is an SSH server.*choose the SSH connection type/.test(msg), msg);
+    assert(Date.now() - t0 < 9000, `took ${Date.now() - t0}ms`);
+    msg = '';
+    try { await api('POST', '/api/connections/test', { protocol: 'ssh', host: '127.0.0.1', port: FTP_PORT, user: 'tester', password: 'x' }); } catch (e) { msg = e.message; }
+    assert(/-> 400: .*is an FTP server/.test(msg), msg);
+  });
   await step('"ssh" connection type with just host, user and password', async () => {
     const c = await api('POST', '/api/connections', { protocol: 'ssh', host: '127.0.0.1', port: SFTP_PORT, user: 'deploy', password: 'ssh-pass!' });
     assert(c.protocol === 'sftp' && c.name === '127.0.0.1' && c.port === SFTP_PORT, JSON.stringify(c));
@@ -478,6 +496,10 @@ async function startFtp() {
     await api('DELETE', `/api/repos/${srid}`);
   });
 
+  await step('version endpoint reports whether a restart is needed', async () => {
+    const v = await api('GET', '/api/version');
+    assert(v.restartNeeded === false && v.startedAt, JSON.stringify(v));
+  });
   await step('UI is served', async () => {
     const html = await fetch(APP + '/').then((r) => r.text());
     assert(html.includes('FTPGit Studio') && html.includes('/js/app.js'), 'index.html');

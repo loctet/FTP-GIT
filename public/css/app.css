@@ -453,3 +453,9 @@ kbd { font-family: var(--mono); font-size: 10.5px; padding: 1px 5px; border-radi
 .key-details summary .icon { color: var(--accent); }
 .key-details[open] summary { color: var(--text); }
 @media (max-width: 700px) { .type-cards { grid-template-columns: 1fr; } .grid-host { grid-template-columns: 1fr; } }
+
+/* ---------------------------------------------------------------- update banner */
+.update-banner { display: flex; align-items: flex-start; gap: 12px; padding: 11px 24px; background: var(--warn-soft); border-bottom: 1px solid color-mix(in srgb, var(--warn) 40%, transparent); color: var(--text); font-size: 13px; }
+.update-banner[hidden] { display: none; }
+.update-banner > .icon { color: var(--warn); font-size: 17px; margin-top: 1px; }
+.update-banner span { color: var(--text-2); }

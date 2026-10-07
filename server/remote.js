@@ -283,7 +283,10 @@ class SftpRemote {
         }
         fail(e);
       });
-      ssh.on('close', () => { this.isClosed = true; });
+      ssh.on('close', () => {
+        this.isClosed = true;
+        fail(Object.assign(new Error('Connection closed before login completed'), { code: 'ECONNRESET' }));
+      });
       ssh.on('end', () => { this.isClosed = true; });
       try {
         ssh.connect(cfg);
@@ -465,6 +468,19 @@ class SftpRemote {
   }
 }
 
+/** Reads the first line a server sends after connecting ('' if none within the timeout). */
+function readBanner(host, port, timeoutMs = 4000) {
+  return new Promise((resolve) => {
+    const sock = require('net').connect({ host, port });
+    let buf = '';
+    const done = () => { sock.destroy(); resolve(buf.split('\n')[0] || ''); };
+    sock.setTimeout(timeoutMs, done);
+    sock.on('data', (d) => { buf += d.toString('latin1'); if (buf.includes('\n')) done(); });
+    sock.on('error', () => resolve(''));
+    sock.on('close', () => resolve(buf.split('\n')[0] || ''));
+  });
+}
+
 function shellQuote(s) {
   return `'${String(s).replace(/'/g, `'\\''`)}'`;
 }
@@ -473,4 +489,4 @@ function createRemote(conn, timeout) {
   return isSftp(conn) ? new SftpRemote(conn, timeout) : new FtpRemote(conn, timeout);
 }
 
-module.exports = { createRemote, FtpRemote, SftpRemote, isNotFound, isSftp, defaultPort, shellQuote, fingerprint };
+module.exports = { createRemote, FtpRemote, SftpRemote, isNotFound, isSftp, defaultPort, shellQuote, fingerprint, readBanner };

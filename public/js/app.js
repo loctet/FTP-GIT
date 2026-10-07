@@ -1889,7 +1889,7 @@
       const wasOffline = !S.live;
       S.live = true;
       renderSideFooter();
-      if (wasOffline && booted) { await loadState(); renderAll(); }
+      if (wasOffline && booted) { await loadState(); renderAll(); checkServerVersion(); }
     };
     es.onerror = () => { S.live = false; renderSideFooter(); };
     const on = (t, fn) => es.addEventListener(t, (e) => { try { fn(JSON.parse(e.data)); } catch (err) { console.error(t, err); } });
@@ -1974,6 +1974,26 @@
   window.addEventListener('dragover', (e) => e.preventDefault());
   window.addEventListener('drop', (e) => e.preventDefault());
 
+  // ================================================================ stale server detection
+  // The page is always served fresh from disk, but the Node server keeps running the code it
+  // started with. If the app was updated, tell the user to restart instead of failing oddly.
+  async function checkServerVersion() {
+    let needed = false;
+    try {
+      const r = await fetch('/api/version');
+      if (r.status === 404) needed = true; // server predates this check: definitely outdated
+      else if (r.ok) needed = !!(await r.json()).restartNeeded;
+    } catch { return; }
+    const el = $('#updateBanner');
+    if (!needed) { el.hidden = true; return; }
+    if (!el.hidden) return;
+    setKids(el, icon('refresh'),
+      h('div', { class: 'grow' }, h('b', null, 'FTPGit Studio was updated — restart it to use the new version. '),
+        h('span', null, 'The server running now is an older copy, so new features (like SSH connections) will not work until you restart. Close the FTPGit Studio console window (or press Ctrl+C in it), then run start.bat or npm start again.')),
+      ibtn('x', 'Hide', () => { el.hidden = true; }, 'sm'));
+    el.hidden = false;
+  }
+
   // ================================================================ boot
   let booted = false;
   async function loadState() {
@@ -2004,6 +2024,8 @@
     connectEvents();
     booted = true;
     setInterval(updateSessionPill, 1000);
+    checkServerVersion();
+    setInterval(checkServerVersion, 30000);
     setInterval(() => { if (!modalStack.length && (S.view === 'deploy')) renderContent(); }, 30000);
   }
 
