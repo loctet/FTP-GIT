@@ -138,6 +138,17 @@ for (const c of db.connections) {
   }
 }
 
+// Mappings saved before local-folder support: a Windows path like D:\project\dist can only be a
+// folder on this computer (it never matched anything in git), so mark those as local.
+for (const r of db.repos) {
+  for (const m of r.mappings || []) {
+    if (m.source) continue;
+    m.source = gitSync.looksAbsoluteLocal(m.local) ? 'local' : 'git';
+    if (m.source === 'local') events.activity('info', 'git', `${r.name}: mapping ${m.local} now uploads from that folder on this computer`, { repoId: r.id });
+    save();
+  }
+}
+
 // Detects "code updated on disk but the running server is still the old one".
 const crypto = require('crypto');
 function codeHash() {
@@ -419,12 +430,20 @@ function repoFromBody(b, existing = {}) {
   const connectionId = b.connectionId ?? existing.connectionId;
   if (!db.connections.some((c) => c.id === connectionId)) throw httpError(400, 'Choose an FTP connection');
   const mappings = (Array.isArray(b.mappings) ? b.mappings : existing.mappings || [])
-    .map((m) => ({
-      id: m.id || id('map'),
-      local: gitSync.normLocal(m.local),
-      remote: gitSync.normRemote(m.remote),
-      deleteRemoved: m.deleteRemoved !== false,
-    }))
+    .map((m) => {
+      const raw = String(m.local ?? '').trim();
+      // "git" = files from the pushed commit; "local" = a folder on this computer (e.g. a build output).
+      // A Windows absolute path can only be a local folder, whatever was selected.
+      const source = gitSync.looksAbsoluteLocal(raw) || m.source === 'local' ? 'local' : 'git';
+      return {
+        id: m.id || id('map'),
+        source,
+        local: source === 'local' ? raw.replace(/[\\/]+$/, '') : gitSync.normLocal(raw),
+        remote: gitSync.normRemote(m.remote),
+        deleteRemoved: m.deleteRemoved !== false,
+        autoDeploy: m.autoDeploy !== false,
+      };
+    })
     .filter((m) => m.remote);
   if (!mappings.length) throw httpError(400, 'Add at least one folder mapping');
   const excludes = Array.isArray(b.excludes)
@@ -449,6 +468,9 @@ function repoFromBody(b, existing = {}) {
     postDeployCwd: String(b.postDeployCwd ?? existing.postDeployCwd ?? '').trim() || null,
   };
   if (typeof b.token === 'string' && (b.token !== '' || b.clearToken)) out.tokenEnc = b.token ? encrypt(b.token) : null;
+  for (const m of out.mappings.filter((x) => x.source === 'local')) {
+    try { gitSync.localMappingDir(out, m); } catch (e) { throw httpError(400, `Mapping "${m.local}": ${e.message}`); }
+  }
   return out;
 }
 
@@ -513,6 +535,28 @@ app.post('/api/repos/:id/sync', wrap(async (req, res) => {
   const p = gitSync.check(r, { full, trigger: full ? 'manual-full' : 'manual' });
   if (req.body?.wait) return res.json(await p);
   res.json({ started: true });
+}));
+
+// Sync one mapping, a sub-folder of it, or all mappings — uploading every file of the branch head
+// (not just the changes). dryRun:true returns the plan without touching the server.
+app.post('/api/repos/:id/sync-scope', wrap(async (req, res) => {
+  const r = findRepo(req.params.id);
+  const b = req.body || {};
+  const scope = { mappingIds: b.mappingIds, mappingId: b.mappingId, subPath: b.subPath, mirror: b.mirror, runCommand: b.runCommand };
+  if (b.dryRun) return res.json(await gitSync.previewScoped(r, scope));
+  const { deploymentId, promise } = gitSync.syncScoped(r, scope);
+  if (b.wait) {
+    const dep = await promise;
+    return res.json({ deploymentId, deployment: gitSync.publicDeployment(dep, true) });
+  }
+  promise.catch(() => {});
+  res.json({ deploymentId });
+}));
+
+// Sub-folders of the repository at the branch head (sub-folder picker).
+app.get('/api/repos/:id/tree', wrap(async (req, res) => {
+  const r = findRepo(req.params.id);
+  res.json(await gitSync.repoTree(r, req.query.path || '', { refresh: req.query.refresh === '1', mappingId: req.query.mappingId || null }));
 }));
 
 app.post('/api/repos/:id/trigger', (req, res) => {

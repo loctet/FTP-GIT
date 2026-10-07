@@ -1507,7 +1507,7 @@
   }
 
   function triggerLabel(t) {
-    return { poll: 'Auto (poll)', 'push-hook': 'Push hook', manual: 'Manual', 'manual-full': 'Full redeploy', initial: 'Initial' }[t] || t;
+    return { poll: 'Auto (poll)', 'push-hook': 'Push hook', manual: 'Manual', 'manual-full': 'Full redeploy', 'manual-scoped': 'Folder sync', initial: 'Initial' }[t] || t;
   }
 
   function renderDeploy(ct) {
@@ -1538,7 +1538,7 @@
           h('td', null, depStatusBadge(d)),
           h('td', null, h('b', null, d.repoName)),
           h('td', null, h('div', { class: 'row' }, h('span', { class: 'chip' }, icon('commit'), short(d.to)), h('span', { class: 'commit-msg', title: d.commit ? d.commit.message : '' }, d.commit ? d.commit.message : ''))),
-          h('td', null, h('span', { class: 'hint' }, triggerLabel(d.trigger), d.full ? ' · full' : '')),
+          h('td', null, h('span', { class: 'hint', title: d.scope || '' }, triggerLabel(d.trigger), d.trigger === 'manual-scoped' && d.scope ? h('div', { class: 'mono', style: { fontSize: '11px', maxWidth: '260px', overflow: 'hidden', textOverflow: 'ellipsis' } }, d.scope) : d.full ? ' · full' : '')),
           h('td', null, d.status === 'running' ? `${d.done}/${d.total}` : h('span', null, h('span', { style: { color: 'var(--success)' } }, `↑${d.uploaded}`), ' ', h('span', { style: { color: 'var(--warn)' } }, `✕${d.deleted}`), d.failed ? h('span', { style: { color: 'var(--danger)' } }, ` ⚠${d.failed}`) : null)),
           h('td', { class: 'hint' }, fmtDuration(d.startedAt, d.finishedAt)),
           h('td', { class: 'hint', title: new Date(d.startedAt).toLocaleString() }, timeAgo(d.startedAt))))))
@@ -1560,28 +1560,198 @@
         enabledSwitch),
       h('div', { class: 'kv' },
         h('div', { class: 'k' }, 'Branch'), h('div', { class: 'v' }, h('span', { class: 'chip' }, icon('git'), r.branch)),
-        h('div', { class: 'k' }, 'FTP server'), h('div', { class: 'v' }, connName(r.connectionId)),
+        h('div', { class: 'k' }, 'Server'), h('div', { class: 'v' }, connName(r.connectionId)),
         h('div', { class: 'k' }, 'Deployed'), h('div', { class: 'v' }, h('span', { class: 'chip' }, short(r.lastDeployedSha)), ' ', h('span', { class: 'hint' }, r.lastDeployedAt ? timeAgo(r.lastDeployedAt) : r.lastDeployedSha ? 'baseline' : 'not yet')),
         pending ? [h('div', { class: 'k' }, 'Remote head'), h('div', { class: 'v' }, h('span', { class: 'chip' }, short(r.lastRemoteSha)), ' ', h('span', { class: 'hint' }, 'not deployed yet'))] : null,
         h('div', { class: 'k' }, 'Last check'), h('div', { class: 'v hint' }, `${timeAgo(r.lastCheckedAt)} · every ${r.pollSec}s${r.localPath ? ' + push hook' : ''}`)),
       h('div', { class: 'mappings' }, r.mappings.map((m) => h('div', { class: 'mapping', title: m.deleteRemoved ? 'Files deleted in git are deleted on FTP' : 'Deletions are not synced' },
-        icon('folder'), h('span', null, m.local ? `${m.local}/` : '(repo root)/'), icon('arrow-right'), h('span', null, m.remote), !m.deleteRemoved ? h('span', { class: 'badge', style: { marginLeft: 'auto' } }, 'keep deleted') : null))),
+        icon(isLocalMap(m) ? 'server' : 'git'), h('span', { title: isLocalMap(m) ? 'Folder on this computer (not from git)' : 'Folder in the repository' }, mappingSource(m)), icon('arrow-right'), h('span', null, m.remote),
+        isLocalMap(m) ? h('span', { class: 'badge info' }, 'local folder') : null,
+        h('span', { class: 'grow' }),
+        !m.deleteRemoved ? h('span', { class: 'badge' }, 'keep deleted') : null,
+        h('button', { class: 'btn sm map-sync', type: 'button', title: 'Upload this folder (or one of its sub-folders) now', disabled: !!running, onclick: () => openSyncDialog(r, { mappingId: m.id }) }, icon('upload'), 'Sync')))),
       running ? h('div', { style: { padding: '6px 18px 4px' } },
         h('div', { class: `progress ${running.total ? '' : 'indet'}` }, h('div', { style: { width: `${running.total ? (running.done / running.total) * 100 : 0}%` } })),
         h('div', { class: 'hint', style: { marginTop: '6px' } }, running.total ? `${running.done} / ${running.total} files` : 'Preparing…')) : null,
       r.lastError && r.status === 'error' ? h('div', { class: 'repo-error' }, icon('alert'), h('div', null, r.lastError)) : null,
       h('div', { class: 'repo-foot' },
-        btn('Sync now', 'play', () => syncRepo(r, false), 'sm primary', { disabled: !!running }),
-        btn('Redeploy all', 'rocket', () => syncRepo(r, true), 'sm', { disabled: !!running }),
+        btn('Sync changes', 'play', () => syncRepo(r, false), 'sm primary', { disabled: !!running, title: 'Upload what changed since the last deployed commit' }),
+        btn('Sync files…', 'upload', () => openSyncDialog(r), 'sm', { disabled: !!running, title: 'Upload all files of every mapping, one mapping, or a sub-folder' }),
         btn('History', 'history', () => { const d = S.deployments.find((x) => x.repoId === r.id); d ? openDeployLog(d.id) : toast('info', 'No deployments yet'); }, 'sm ghost'),
         h('span', { class: 'grow' }),
         ibtn('edit', 'Edit', () => openRepoForm(r), 'sm'),
         ibtn('more', 'More', (e) => repoMenu(r, e.clientX, e.clientY), 'sm')));
   }
 
+  // ---------------------------------------------------------------- scoped sync dialog
+  const looksAbsoluteLocal = (p) => /^[A-Za-z]:[\\/]/.test(String(p || '')) || /^\\\\/.test(String(p || ''));
+  const isLocalMap = (m) => m && (m.source === 'local' || (!m.source && looksAbsoluteLocal(m.local)));
+  const mappingSource = (m) => (isLocalMap(m) ? m.local : m.local ? m.local + '/' : '(repo root)/');
+  const mappingLabel = (m) => `${isLocalMap(m) ? '💻 ' : ''}${mappingSource(m)} → ${m.remote}`;
+
+  function openSyncDialog(r, { mappingId = '' } = {}) {
+    const select = h('select', { class: 'select' },
+      h('option', { value: '' }, `All mappings (${r.mappings.length}) — every file`),
+      r.mappings.map((m) => h('option', { value: m.id }, mappingLabel(m))));
+    select.value = mappingId || '';
+    const sub = h('input', { class: 'input mono', placeholder: 'empty = the whole folder · e.g. assets/img', spellcheck: 'false' });
+    const subHint = h('div', { class: 'hint' });
+    const browse = btn('Browse', 'folder', async () => {
+      const m = r.mappings.find((x) => x.id === select.value);
+      if (!m) return;
+      const picked = await pickRepoFolder(r, m, sub.value);
+      if (picked !== null) { sub.value = picked; invalidate(); }
+    }, 'sm');
+    const mirror = h('input', { type: 'checkbox' });
+    const runCmd = h('input', { type: 'checkbox' });
+    const out = h('div');
+    let preview = null;
+    let previewKey = null;
+
+    const params = () => ({ mappingId: select.value || undefined, subPath: select.value ? sub.value.trim() : '', mirror: mirror.checked, runCommand: runCmd.checked });
+    const key = () => JSON.stringify(params());
+    const syncInfo = h('div');
+    let lastSel = null;
+    const invalidate = () => {
+      preview = null;
+      previewKey = null;
+      setKids(out);
+      const m = r.mappings.find((x) => x.id === select.value);
+      if (select.value !== lastSel) {
+        lastSel = select.value;
+        // A build folder usually replaces what is on the server: propose mirror (with confirmation).
+        mirror.checked = !!(m && isLocalMap(m));
+      }
+      const anyLocal = m ? isLocalMap(m) : r.mappings.some(isLocalMap);
+      const anyGit = m ? !isLocalMap(m) : r.mappings.some((x) => !isLocalMap(x));
+      setKids(syncInfo, h('div', { class: 'callout' }, icon('info'), h('div', null,
+        anyGit ? h('div', null, 'Git folders: every file as it is in the latest pushed commit on ', h('b', null, r.branch), ' (unpushed local edits are not included).') : null,
+        anyLocal ? h('div', null, 'Local folders: every file currently in the folder on this computer — build it first (e.g. ', h('code', null, 'npm run build'), ').') : null)));
+      sub.disabled = !m;
+      browse.disabled = !m;
+      if (!m) sub.value = '';
+      const subP = sub.value.trim().replace(/^\/+|\/+$/g, '');
+      subHint.textContent = m
+        ? `Uploads ${m.local ? m.local + '/' : ''}${subP ? subP + '/' : ''}… → ${m.remote.replace(/\/$/, '')}${subP ? '/' + subP : ''}/`
+        : 'Uploads every file of every mapping (same as "Redeploy all").';
+    };
+    select.addEventListener('change', invalidate);
+    sub.addEventListener('input', invalidate);
+    mirror.addEventListener('change', invalidate);
+    runCmd.addEventListener('change', invalidate);
+
+    const renderPreview = (p) => {
+      const list = [
+        ...p.uploads.map((o) => h('div', { class: 'l' }, h('span', { class: 'success' }, '↑ '), o.remote, h('span', { class: 't', style: { marginLeft: '8px' } }, fmtSize(o.size)))),
+        ...p.deletes.map((o) => h('div', { class: 'l' }, h('span', { class: 'error' }, '✕ '), o.remote)),
+      ];
+      setKids(out, h('div', { class: 'stack', style: { gap: '10px' } },
+        h('div', { class: `callout ${p.deleteCount ? 'err' : 'ok'}` }, icon(p.deleteCount ? 'alert' : 'check-circle'), h('div', null,
+          h('b', null, `${p.uploadCount} file${p.uploadCount === 1 ? '' : 's'} to upload (${fmtSize(p.uploadBytes)})`),
+          mirror.checked ? h('span', null, ` · ${p.deleteCount} file${p.deleteCount === 1 ? '' : 's'} to delete on the server`) : null,
+          p.usesGit ? h('div', { class: 'hint' }, `Git files from commit ${short(p.sha)} on ${p.branch}: ${p.subject}`) : null,
+          (p.localDirs || []).map((d) => h('div', { class: 'hint' }, 'Local files from ', h('code', null, d))))),
+        list.length ? h('div', { class: 'console', style: { maxHeight: '240px' } }, list, p.truncated ? h('div', { class: 'l t' }, '… list truncated') : null) : h('div', { class: 'hint' }, 'Nothing to upload: no files match (check the mapping source, sub-folder and exclude patterns; a local build folder may be empty).')));
+    };
+
+    const runPreview = async () => {
+      previewBtn.disabled = true;
+      setKids(out, h('div', { class: 'callout' }, icon('loader', 'spin'), mirror.checked ? 'Fetching the branch and listing the server folder…' : 'Fetching the branch…'));
+      try {
+        const k = key();
+        const p = await api('POST', `/api/repos/${r.id}/sync-scope`, { ...params(), dryRun: true });
+        preview = p;
+        previewKey = k;
+        renderPreview(p);
+        return p;
+      } catch (e) {
+        setKids(out, h('div', { class: 'callout err' }, icon('x-circle'), e.message));
+        return null;
+      } finally { previewBtn.disabled = false; }
+    };
+
+    const runSync = async () => {
+      if (mirror.checked) {
+        const p = preview && previewKey === key() ? preview : await runPreview();
+        if (!p) return;
+        if (p.deleteCount && !(await confirmDialog({
+          title: `Delete ${p.deleteCount} file${p.deleteCount === 1 ? '' : 's'} on the server?`,
+          message: h('div', null,
+            h('p', { style: { marginTop: 0 } }, 'Mirror mode deletes server files in this folder that are not in the source. Files matching your exclude patterns are kept.'),
+            h('div', { class: 'console', style: { maxHeight: '180px' } }, p.deletes.slice(0, 200).map((o) => h('div', { class: 'l' }, h('span', { class: 'error' }, '✕ '), o.remote)))),
+          confirmText: 'Sync and delete', danger: true,
+        }))) return;
+      }
+      syncBtn.disabled = true;
+      try {
+        const res = await api('POST', `/api/repos/${r.id}/sync-scope`, params());
+        m.close();
+        toast('info', 'Sync started', select.value ? mappingLabel(r.mappings.find((x) => x.id === select.value)) : 'All mappings');
+        openDeployLog(res.deploymentId);
+      } catch (e) {
+        toast('error', 'Sync failed to start', e.message);
+      } finally { syncBtn.disabled = false; }
+    };
+
+    const previewBtn = btn('Preview', 'eye', runPreview);
+    const syncBtn = btn('Sync now', 'upload', runSync, 'primary');
+    const m = modal({
+      title: `Sync files — ${r.name}`, iconName: 'upload', size: 'wide',
+      body: h('div', { class: 'stack' },
+        syncInfo,
+        h('div', { class: 'field' }, h('label', null, 'What to sync'), select),
+        h('div', { class: 'field' }, h('label', null, 'Only this sub-folder (optional)'), h('div', { class: 'row' }, sub, browse), subHint),
+        h('label', { class: 'check' }, mirror, h('span', null, 'Replace the server folder (mirror): also delete server files that are not in the source',
+          h('div', { class: 'hint' }, 'Only inside the synced folder. Files matching the exclude patterns (e.g. vendor/, uploads/, .env) are never deleted. You will see the list before anything is deleted.'))),
+        r.postDeployCommand ? h('label', { class: 'check' }, runCmd, h('span', null, 'Run the post-deploy command afterwards', h('div', { class: 'hint mono' }, r.postDeployCommand))) : null,
+        out),
+      foot: [h('div', { class: 'left' }, previewBtn), btn('Cancel', null, () => m.close()), syncBtn],
+    });
+    invalidate();
+  }
+
+  /** Browse the repository folders (at the branch head) inside a mapping. Resolves to a path relative to the mapping, or null. */
+  function pickRepoFolder(r, mapping, start) {
+    return new Promise((resolve) => {
+      const local = (mapping.local || '').replace(/^\/+|\/+$/g, '');
+      let cur = String(start || '').replace(/^\/+|\/+$/g, '');
+      let picked = null;
+      let refreshed = false;
+      const pathEl = h('div', { class: 'mono hint' });
+      const listEl = h('div', { class: 'picker-list' });
+      const load = async (rel) => {
+        setKids(listEl, h('div', { class: 'picker-item hint' }, icon('loader', 'spin'), refreshed ? 'Loading…' : 'Fetching the branch…'));
+        try {
+          const isLoc = isLocalMap(mapping);
+          const full = isLoc ? rel : [local, rel].filter(Boolean).join('/');
+          const t = await api('GET', `/api/repos/${r.id}/tree?${q({ path: full, refresh: refreshed || isLoc ? '0' : '1', mappingId: mapping.id })}`);
+          refreshed = true;
+          cur = rel;
+          pathEl.textContent = isLoc ? `${t.root}${cur ? '\\' + cur.replace(/\//g, '\\') : ''}` : `${local || '(repo root)'}/${cur ? cur + '/' : ''}`;
+          const strip = (p) => (isLoc || !local ? p : p.slice(local.length + 1));
+          setKids(listEl,
+            cur ? h('div', { class: 'picker-item', onclick: () => load(cur.split('/').slice(0, -1).join('/')) }, icon('arrow-up'), '..') : null,
+            ...t.dirs.map((d) => h('div', { class: 'picker-item', onclick: () => load(strip(d.path)) }, h('span', { class: 'ficon dir' }, icon('folder')), d.name)),
+            !t.dirs.length ? h('div', { class: 'picker-item hint' }, 'No sub-folders') : null);
+        } catch (e) {
+          setKids(listEl, h('div', { class: 'picker-item', style: { color: 'var(--danger)' } }, icon('alert'), e.message));
+        }
+      };
+      const m = modal({
+        title: 'Choose a sub-folder', iconName: 'folder',
+        body: h('div', { class: 'stack' }, h('div', { class: 'hint' }, isLocalMap(mapping) ? 'Folders on this computer' : `Folders in ${mapping.local || 'the repository'} on branch ${r.branch} (latest pushed commit)`), pathEl, listEl),
+        foot: [btn('Whole mapping', null, () => { picked = ''; m.close(); }), btn('Cancel', null, () => m.close()), btn('Select this folder', 'check', () => { picked = cur; m.close(); }, 'primary')],
+        onClose: () => resolve(picked),
+      });
+      load(cur);
+    });
+  }
+
+
   function repoMenu(r, x, y) {
     showMenu(x, y, [
-      { label: 'Sync now', icon: 'play', action: () => syncRepo(r, false) },
+      { label: 'Sync changes', icon: 'play', action: () => syncRepo(r, false) },
+      { label: 'Sync files…', icon: 'upload', action: () => openSyncDialog(r) },
       { label: 'Redeploy all files', icon: 'rocket', action: () => syncRepo(r, true) },
       { label: 'Mark remote head as deployed', icon: 'check', action: () => markDeployed(r) },
       '-',
@@ -1673,10 +1843,28 @@
     const renderMaps = () => {
       setKids(mapHost, 
         ...mappings.map((m, i) => {
-          const local = h('input', { class: 'input mono', value: m.local, placeholder: 'dist  (empty = whole repo)', oninput: (ev) => (m.local = ev.target.value) });
+          if (!m.source) m.source = looksAbsoluteLocal(m.local) ? 'local' : 'git';
+          const local = h('input', { class: 'input mono', value: m.local, spellcheck: 'false' });
+          const srcSel = h('select', { class: 'select map-src', title: 'Where the files come from' },
+            h('option', { value: 'git' }, 'Git'), h('option', { value: 'local' }, 'Local folder'));
+          srcSel.value = m.source;
+          const syncSrc = () => {
+            local.placeholder = m.source === 'local' ? 'D:\\project\\frontend\\dist  or  frontend/dist' : 'dist  (folder in the repo, empty = whole repo)';
+            local.title = m.source === 'local'
+              ? 'A folder on this computer, e.g. a build output that is not in git. Absolute, or relative to the repository local folder.'
+              : 'A folder inside the repository: files come from the pushed commit.';
+          };
+          srcSel.addEventListener('change', () => { m.source = srcSel.value; syncSrc(); });
+          local.addEventListener('input', (ev) => {
+            m.local = ev.target.value;
+            // A path like D:\... can only be a folder on this computer.
+            if (looksAbsoluteLocal(m.local) && m.source !== 'local') { m.source = 'local'; srcSel.value = 'local'; syncSrc(); }
+          });
+          syncSrc();
           const remote = h('input', { class: 'input mono', value: m.remote, placeholder: '~/public_html  or  /absolute/path', oninput: (ev) => (m.remote = ev.target.value) });
           const del = h('label', { class: 'switch', title: 'Delete files on FTP when they are deleted in git' }, h('input', { type: 'checkbox', checked: m.deleteRemoved !== false, onchange: (ev) => (m.deleteRemoved = ev.target.checked) }), h('span'));
           return h('div', { class: 'map-row' },
+            srcSel,
             local,
             h('span', { class: 'arrow' }, icon('arrow-right')),
             h('div', { class: 'row' }, remote, ibtn('folder', 'Browse FTP folders', async () => {
@@ -1686,7 +1874,7 @@
             del,
             ibtn('trash', 'Remove mapping', () => { mappings.splice(i, 1); renderMaps(); }, '', { disabled: mappings.length === 1 }));
         }),
-        h('div', { class: 'row' }, btn('Add mapping', 'plus', () => { mappings.push({ local: '', remote: '~', deleteRemoved: true }); renderMaps(); }, 'sm'), h('span', { class: 'hint' }, '~ = home folder on the server (e.g. ~/erp-api). Toggle = also delete on the server when deleted in git.'))
+        h('div', { class: 'row' }, btn('Add mapping', 'plus', () => { mappings.push({ source: 'git', local: '', remote: '~', deleteRemoved: true }); renderMaps(); }, 'sm'), h('span', { class: 'hint' }, 'Git = files of the pushed commit · Local folder = a folder on this PC, e.g. a build output (dist) that is not in git. ~ = home folder on the server. Toggle = also delete on the server what was deleted at the source.'))
       );
     };
     renderMaps();

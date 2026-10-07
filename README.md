@@ -29,9 +29,15 @@ When you push to `main`, the app uploads the changed files of the folders you ma
 **Git → server deploy**
 - Add a repository from its local folder or its remote URL. Choose the branch (default `main`) and the connection (FTP, FTPS or SFTP).
 - **Folder mappings**: `dist → /public_html`, `api → /public_html/api`, and so on, plus exclude patterns.
+- **Each mapping has a source:** *Git*, for files of the pushed commit, or *Local folder*, for a folder on this computer such as a React/Vite build output (`frontend/dist`) that is not committed. A local folder can be an absolute path (`D:\project\frontend\dist`) or relative to the repository's local folder. Automatic deploys also send what changed in local folders since the last upload, including deleting stale build files.
 - Only changed files are uploaded (`git diff`). Files deleted in git are deleted on the server. You can turn this off per mapping.
 - The app detects pushes by `git ls-remote` polling. An optional **pre-push hook** makes a deploy start seconds after `git push`.
-- The app shows a live progress bar, the deployment history, and full logs. *Sync now*, *Redeploy all* and *Mark as deployed* are available.
+- The app shows a live progress bar, the deployment history, and full logs.
+- **Manual sync, whenever you want:**
+  - *Sync changes* uploads what changed since the last deployed commit.
+  - The **Sync** button on each mapping (or *Sync files…* for all mappings) uploads every file of that folder. You can limit it to a sub-folder picked from the repository tree.
+  - **Preview** shows exactly what will be uploaded first.
+  - Optional **mirror** mode also deletes server files that are not in git. It never deletes files that match the exclude patterns or folders that belong to other mappings, and it never mirrors your whole home folder.
 - Deploys come from a private clone, so uncommitted work is never uploaded and line endings are kept byte for byte.
 
 **Activity log**: shows every connection, transfer, SSH command, and deploy, with filters and search.

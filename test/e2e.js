@@ -90,7 +90,7 @@ async function startFtp() {
   const ftpSrv = await startFtp();
   // A connection saved by the pre-SSH version (no protocol field) on port 22.
   fs.mkdirSync(process.env.FTPGIT_DATA, { recursive: true });
-  fs.writeFileSync(path.join(process.env.FTPGIT_DATA, 'db.json'), JSON.stringify({ connections: [{ id: 'con_legacy', name: 'Legacy', host: '127.0.0.1', port: 22, user: 'x', secure: 'none', remoteRoot: '/' }, { id: 'con_legacy_ssh', name: 'Old SSH', protocol: 'sftp', host: '127.0.0.1', port: 2200, user: 'x', secure: 'none', remoteRoot: '/' }] }));
+  fs.writeFileSync(path.join(process.env.FTPGIT_DATA, 'db.json'), JSON.stringify({ connections: [{ id: 'con_legacy', name: 'Legacy', host: '127.0.0.1', port: 22, user: 'x', secure: 'none', remoteRoot: '/' }, { id: 'con_legacy_ssh', name: 'Old SSH', protocol: 'sftp', host: '127.0.0.1', port: 2200, user: 'x', secure: 'none', remoteRoot: '/' }], repos: [{ id: 'repo_legacy', name: 'legacy', url: 'x', branch: 'main', connectionId: 'con_legacy', enabled: false, mappings: [{ id: 'map_l', local: 'D:/x/dist', remote: '~/f' }] }] }));
   const { start } = require('../server/index');
   const server = await start(Number(process.env.PORT), '127.0.0.1');
   const { db } = require('../server/store');
@@ -566,6 +566,131 @@ async function startFtp() {
   await step('existing SSH connection saved with "/" is migrated to start at "~"', async () => {
     const c = db.connections.find((x) => x.id === 'con_legacy_ssh');
     assert(c && c.remoteRoot === '~' && c.homeStart, JSON.stringify(c));
+  });
+  // ---------------------------------------------------------------- scoped sync (per mapping / sub-folder / mirror)
+  const H = (...p) => path.join(HOME_ROOT, 'homez.42', 'ovh', ...p);
+  let srepo;
+  await step('scoped sync: repo with nested mappings (dist → ~/front, api → ~/front/api)', async () => {
+    const info = await api('POST', '/api/git/inspect', { source: WORK });
+    srepo = await api('POST', '/api/repos', {
+      name: 'scoped', url: info.url, branch: 'main', connectionId: hid, pollSec: 3600,
+      mappings: [{ local: 'dist', remote: '~/front' }, { local: 'api', remote: '~/front/api' }],
+      excludes: '*.map\nuploads/',
+    });
+    srepo = await waitFor(async () => { const x = await api('GET', `/api/repos/${srepo.id}`); return x.lastDeployedSha ? x : null; }, 30000, 200, 'baseline');
+    assert(!fs.existsSync(H('front')), 'nothing uploaded at baseline');
+  });
+  await step('preview one mapping lists its files without uploading', async () => {
+    const p = await api('POST', `/api/repos/${srepo.id}/sync-scope`, { mappingId: srepo.mappings[1].id, dryRun: true });
+    assert(p.uploadCount === 1 && p.uploads[0].remote === '~/front/api/handler.php' && p.deleteCount === 0, JSON.stringify(p));
+    assert(!fs.existsSync(H('front')), 'dry run uploads nothing');
+  });
+  await step('sync one mapping uploads only that folder and keeps the deployed commit', async () => {
+    const before = (await api('GET', `/api/repos/${srepo.id}`)).lastDeployedSha;
+    const r = await api('POST', `/api/repos/${srepo.id}/sync-scope`, { mappingId: srepo.mappings[1].id, wait: true });
+    assert(r.deployment.status === 'success' && r.deployment.trigger === 'manual-scoped' && r.deployment.uploaded === 1, JSON.stringify(r.deployment).slice(0, 300));
+    assert(fs.existsSync(H('front', 'api', 'handler.php')) && !fs.existsSync(H('front', 'index.html')), 'only api synced');
+    assert((await api('GET', `/api/repos/${srepo.id}`)).lastDeployedSha === before, 'deployed commit unchanged');
+  });
+  await step('repository tree lists sub-folders for the picker', async () => {
+    const t = await api('GET', `/api/repos/${srepo.id}/tree?path=dist&refresh=1`);
+    const names = t.dirs.map((d) => d.name).sort().join(',');
+    assert(names === 'assets,css', names);
+  });
+  await step('sync a sub-folder of a mapping', async () => {
+    const r = await api('POST', `/api/repos/${srepo.id}/sync-scope`, { mappingId: srepo.mappings[0].id, subPath: 'assets', wait: true });
+    assert(r.deployment.status === 'success' && r.deployment.uploaded === 1, JSON.stringify(r.deployment).slice(0, 300));
+    assert(fs.existsSync(H('front', 'assets', 'logo.svg')) && !fs.existsSync(H('front', 'index.html')), 'only assets synced');
+    let msg = '';
+    try { await api('POST', `/api/repos/${srepo.id}/sync-scope`, { subPath: 'assets', dryRun: true }); } catch (e) { msg = e.message; }
+    assert(/400: Choose one mapping/.test(msg), msg);
+  });
+  await step('mirror a sub-folder deletes only extra files inside it', async () => {
+    fs.writeFileSync(H('front', 'assets', 'old.png'), 'x');
+    fs.writeFileSync(H('front', 'stale.html'), 'x');
+    fs.mkdirSync(H('front', 'uploads'), { recursive: true });
+    fs.writeFileSync(H('front', 'uploads', 'user.jpg'), 'x');
+    const p = await api('POST', `/api/repos/${srepo.id}/sync-scope`, { mappingId: srepo.mappings[0].id, subPath: 'assets', mirror: true, dryRun: true });
+    assert(p.deleteCount === 1 && p.deletes[0].remote.endsWith('/front/assets/old.png'), JSON.stringify(p.deletes));
+    const r = await api('POST', `/api/repos/${srepo.id}/sync-scope`, { mappingId: srepo.mappings[0].id, subPath: 'assets', mirror: true, wait: true });
+    assert(r.deployment.status === 'success' && r.deployment.deleted === 1, JSON.stringify(r.deployment).slice(0, 300));
+    assert(!fs.existsSync(H('front', 'assets', 'old.png')) && fs.existsSync(H('front', 'stale.html')), 'only inside sub-folder');
+  });
+  await step('mirror a whole mapping keeps excluded files and nested mappings', async () => {
+    const r = await api('POST', `/api/repos/${srepo.id}/sync-scope`, { mappingId: srepo.mappings[0].id, mirror: true, wait: true });
+    assert(r.deployment.status === 'success', r.deployment.log.map((l) => l.message).join('\n'));
+    assert(!fs.existsSync(H('front', 'stale.html')), 'extra file deleted');
+    assert(fs.existsSync(H('front', 'uploads', 'user.jpg')), 'excluded uploads/ kept');
+    assert(fs.existsSync(H('front', 'api', 'handler.php')), 'nested mapping kept');
+    assert(fs.readFileSync(H('front', 'index.html'), 'utf8') === '<h1>v4</h1>', 'mapping uploaded');
+  });
+  await step('mirror refuses to run on the home folder itself', async () => {
+    await api('PUT', `/api/repos/${srepo.id}`, { mappings: [...srepo.mappings, { local: 'api', remote: '~' }] });
+    const rr = await api('GET', `/api/repos/${srepo.id}`);
+    const homeMap = rr.mappings.find((m) => m.remote === '~');
+    let msg = '';
+    try { await api('POST', `/api/repos/${srepo.id}/sync-scope`, { mappingId: homeMap.id, mirror: true, dryRun: true }); } catch (e) { msg = e.message; }
+    assert(/400: Refusing to mirror/.test(msg), msg);
+  });
+  await step('sync all mappings counts as a full deploy', async () => {
+    await api('PUT', `/api/repos/${srepo.id}`, { mappings: srepo.mappings });
+    const r = await api('POST', `/api/repos/${srepo.id}/sync-scope`, { wait: true });
+    assert(r.deployment.status === 'success' && r.deployment.trigger === 'manual-full' && r.deployment.uploaded === 4, JSON.stringify(r.deployment).slice(0, 300));
+    const x = await api('GET', `/api/repos/${srepo.id}`);
+    assert(x.lastDeployedSha === git(['rev-parse', 'HEAD'], WORK) && x.lastDeployedAt, 'deployed commit recorded');
+    await api('DELETE', `/api/repos/${srepo.id}`);
+  });
+  // ---------------------------------------------------------------- local-folder mappings (build output not in git)
+  const BUILD = path.join(TMP, 'react-app', 'frontend', 'dist');
+  const writeBuild = (rel, content) => { const p = path.join(BUILD, ...rel.split('/')); fs.mkdirSync(path.dirname(p), { recursive: true }); fs.writeFileSync(p, content); };
+  writeBuild('index.html', '<div id=root></div>');
+  writeBuild('assets/app-abc.js', 'console.log(1)');
+  let lrepo;
+  await step('a Windows path as mapping source becomes a local-folder mapping', async () => {
+    const info = await api('POST', '/api/git/inspect', { source: WORK });
+    lrepo = await api('POST', '/api/repos', {
+      name: 'react', url: info.url, localPath: WORK, branch: 'main', connectionId: hid, pollSec: 3600,
+      mappings: [{ local: BUILD, remote: '~/react' }, { local: 'api', remote: '~/react-api' }],
+    });
+    assert(lrepo.mappings[0].source === 'local' && lrepo.mappings[1].source === 'git', JSON.stringify(lrepo.mappings));
+    await waitFor(async () => (await api('GET', `/api/repos/${lrepo.id}`)).lastDeployedSha, 30000, 200, 'baseline');
+    let msg = '';
+    try { await api('POST', '/api/repos', { name: 'x', url: info.url, branch: 'main', connectionId: hid, mappings: [{ source: 'local', local: 'frontend/dist', remote: '~/x' }] }); } catch (e) { msg = e.message; }
+    assert(/400: .*relative: set the repository's local folder/.test(msg), msg);
+  });
+  await step('preview of a local folder lists files from disk (no git needed)', async () => {
+    const p = await api('POST', `/api/repos/${lrepo.id}/sync-scope`, { mappingId: lrepo.mappings[0].id, dryRun: true });
+    assert(p.usesGit === false && p.uploadCount === 2 && p.localDirs[0] === path.resolve(BUILD), JSON.stringify(p).slice(0, 400));
+  });
+  await step('sync a local folder with "replace server folder" (mirror)', async () => {
+    fs.mkdirSync(H('react', 'assets'), { recursive: true });
+    fs.writeFileSync(H('react', 'assets', 'app-old.js'), 'old build');
+    const r = await api('POST', `/api/repos/${lrepo.id}/sync-scope`, { mappingId: lrepo.mappings[0].id, mirror: true, wait: true });
+    assert(r.deployment.status === 'success' && r.deployment.uploaded === 2 && r.deployment.deleted === 1 && !r.deployment.to, JSON.stringify(r.deployment).slice(0, 400));
+    assert(fs.readFileSync(H('react', 'index.html'), 'utf8') === '<div id=root></div>' && !fs.existsSync(H('react', 'assets', 'app-old.js')), 'server folder replaced');
+    assert(!fs.existsSync(H('react-api')), 'git mapping untouched');
+  });
+  await step('sub-folder picker browses the local folder', async () => {
+    const t = await api('GET', `/api/repos/${lrepo.id}/tree?mappingId=${lrepo.mappings[0].id}`);
+    assert(t.local && t.dirs.map((d) => d.name).join(',') === 'assets', JSON.stringify(t));
+  });
+  await step('automatic deploy sends only changed local files and removes stale ones', async () => {
+    fs.renameSync(path.join(BUILD, 'assets', 'app-abc.js'), path.join(BUILD, 'assets', 'app-def.js')); // a rebuild with new hashes
+    write('api/handler.php', '<?php echo 2;');
+    git(['commit', '-am', 'api v2'], WORK);
+    git(['push', 'origin', 'main'], WORK);
+    const r = await api('POST', `/api/repos/${lrepo.id}/sync`, { wait: true });
+    const d = r.deployment;
+    assert(d && d.status === 'success', JSON.stringify(r).slice(0, 400));
+    const ups = d.log.filter((l) => l.message.startsWith('Uploaded')).map((l) => l.message).join(' | ');
+    assert(/react\/assets\/app-def\.js/.test(ups) && /react-api\/handler\.php/.test(ups) && !/index\.html/.test(ups), ups);
+    assert(!fs.existsSync(H('react', 'assets', 'app-abc.js')) && fs.existsSync(H('react', 'assets', 'app-def.js')), 'stale build file removed');
+    await api('DELETE', `/api/repos/${lrepo.id}`);
+  });
+  await step('legacy mapping with a Windows path is migrated to a local folder', async () => {
+    const r = db.repos.find((x) => x.id === 'repo_legacy');
+    assert(r && r.mappings[0].source === 'local', JSON.stringify(r && r.mappings));
+    db.repos.splice(db.repos.indexOf(r), 1);
   });
   homeSrv.close();
 
